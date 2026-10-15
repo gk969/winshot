@@ -1,0 +1,37 @@
+#pragma once
+
+#include "Annotation.h"
+
+namespace annot {
+
+// Z-ordered bottom to top. The list owns the annotations; callers borrow raw
+// pointers for one message handler at a time.
+class AnnotationList {
+public:
+    size_t Count() const { return m_items.size(); }
+    Annotation* At(size_t i) const {
+        return i < m_items.size() ? m_items[i].get() : nullptr;
+    }
+    int IndexOf(const Annotation* a) const;
+
+    void Add(std::unique_ptr<Annotation> a);
+    void InsertAt(size_t i, std::unique_ptr<Annotation> a);
+    std::unique_ptr<Annotation> RemoveAt(size_t i);
+    std::unique_ptr<Annotation> ReplaceAt(size_t i, std::unique_ptr<Annotation> a);
+    void Clear();
+
+    // Topmost annotation under pt, or nullptr.
+    Annotation* TopAt(Gdiplus::PointF pt) const;
+
+    void DrawAll(Gdiplus::Graphics& g) const;
+
+private:
+    std::vector<std::unique_ptr<Annotation>> m_items;
+};
+
+// Selection chrome, per 矩形-点击已画矩形.png and
+// 椭圆-点击已画椭圆可调整大小位置.png: a thin red box where the shape does not
+// draw its own, and a white-cored red ring on every handle.
+void DrawSelection(Gdiplus::Graphics& g, const Annotation& a, Gdiplus::REAL radius);
+
+}  // namespace annot

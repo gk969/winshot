@@ -1,0 +1,143 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project DefaultTargets="Build" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup Label="ProjectConfigurations">
+    <ProjectConfiguration Include="Debug|x64">
+      <Configuration>Debug</Configuration>
+      <Platform>x64</Platform>
+    </ProjectConfiguration>
+    <ProjectConfiguration Include="Release|x64">
+      <Configuration>Release</Configuration>
+      <Platform>x64</Platform>
+    </ProjectConfiguration>
+  </ItemGroup>
+  <PropertyGroup Label="Globals">
+    <RootNamespace>winshot</RootNamespace>
+    <ProjectGuid>{1F0B2A6E-3C11-4A7E-9B2D-DEADBEEF0001}</ProjectGuid>
+    <Keyword>MFCProj</Keyword>
+    <WindowsTargetPlatformVersion>10.0.26100.0</WindowsTargetPlatformVersion>
+    <PlatformToolset>v143</PlatformToolset>
+  </PropertyGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
+  <PropertyGroup Condition="'$(Configuration)'=='Debug'" Label="Configuration">
+    <ConfigurationType>Application</ConfigurationType>
+    <UseOfMfc>Static</UseOfMfc>
+    <UseOfAtl>false</UseOfAtl>
+    <CharacterSet>Unicode</CharacterSet>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)'=='Release'" Label="Configuration">
+    <ConfigurationType>Application</ConfigurationType>
+    <UseOfMfc>Static</UseOfMfc>
+    <UseOfAtl>false</UseOfAtl>
+    <CharacterSet>Unicode</CharacterSet>
+    <WholeProgramOptimization>true</WholeProgramOptimization>
+  </PropertyGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.props" />
+  <PropertyGroup>
+    <OutDir>$(ProjectDir)x64\$(Configuration)\</OutDir>
+    <IntDir>$(ProjectDir)obj\$(Configuration)\</IntDir>
+    <TargetName>winshot</TargetName>
+  </PropertyGroup>
+  <ItemDefinitionGroup>
+    <ClCompile>
+      <PreprocessorDefinitions>WINVER=0x0A00;_WIN32_WINNT=0x0A00;_WIN32_WINDOWS=0x0A00;_WIN32_IE=0x0A00;UNICODE;_UNICODE;_CRT_SECURE_NO_WARNINGS;NOMINMAX;WINRT_LEAN_AND_MEAN;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <LanguageStandard>stdcpp20</LanguageStandard>
+      <ConformanceMode>true</ConformanceMode>
+      <WarningLevel>Level4</WarningLevel>
+      <AdditionalOptions>/bigobj /source-charset:utf-8 %(AdditionalOptions)</AdditionalOptions>
+      <AdditionalIncludeDirectories>$(ProjectDir)src;$(ProjectDir)src\session;$(ProjectDir)src\annot;$(ProjectDir)src\out;$(ProjectDir)src\longshot;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <PrecompiledHeader>Use</PrecompiledHeader>
+      <PrecompiledHeaderFile>stdafx.h</PrecompiledHeaderFile>
+      <MultiProcessorCompilation>true</MultiProcessorCompilation>
+      <Optimization Condition="'$(Configuration)'=='Release'">MaxSpeed</Optimization>
+      <FunctionLevelLinking Condition="'$(Configuration)'=='Release'">true</FunctionLevelLinking>
+      <IntrinsicFunctions Condition="'$(Configuration)'=='Release'">true</IntrinsicFunctions>
+      <RuntimeLibrary Condition="'$(Configuration)'=='Release'">MultiThreaded</RuntimeLibrary>
+      <RuntimeLibrary Condition="'$(Configuration)'=='Debug'">MultiThreadedDebug</RuntimeLibrary>
+    </ClCompile>
+    <Link>
+      <SubSystem>Windows</SubSystem>
+      <GenerateDebugInformation>true</GenerateDebugInformation>
+      <EnableCOMDATFolding Condition="'$(Configuration)'=='Release'">true</EnableCOMDATFolding>
+      <OptimizeReferences Condition="'$(Configuration)'=='Release'">true</OptimizeReferences>
+    </Link>
+    <Manifest>
+      <AdditionalManifestFiles>$(ProjectDir)app.manifest %(AdditionalManifestFiles)</AdditionalManifestFiles>
+    </Manifest>
+    <ResourceCompile>
+      <PreprocessorDefinitions>UNICODE;_UNICODE;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+    </ResourceCompile>
+  </ItemDefinitionGroup>
+  <ItemGroup>
+    <ClInclude Include="src\stdafx.h" />
+    <ClInclude Include="src\AppMessages.h" />
+    <ClInclude Include="src\Dpi.h" />
+    <ClInclude Include="src\TrayIcon.h" />
+    <ClInclude Include="src\HiddenWnd.h" />
+    <ClInclude Include="src\WinshotApp.h" />
+    <ClInclude Include="src\DesktopCapture.h" />
+    <ClInclude Include="src\session\SelectionModel.h" />
+    <ClInclude Include="src\session\Toolbar.h" />
+    <ClInclude Include="src\session\Glyphs.h" />
+    <ClInclude Include="src\session\ToolbarWnd.h" />
+    <ClInclude Include="src\session\PropertyBarWnd.h" />
+    <ClInclude Include="src\session\OverlayWnd.h" />
+    <ClInclude Include="src\session\TextEditor.h" />
+    <ClInclude Include="src\session\Loupe.h" />
+    <ClInclude Include="src\session\CaptureSession.h" />
+    <ClInclude Include="src\annot\Annotation.h" />
+    <ClInclude Include="src\annot\HandleGeom.h" />
+    <ClInclude Include="src\annot\Shapes.h" />
+    <ClInclude Include="src\annot\AnnotationList.h" />
+    <ClInclude Include="src\annot\Commands.h" />
+    <ClInclude Include="src\out\Compositor.h" />
+    <ClInclude Include="src\out\ExportPng.h" />
+    <ClInclude Include="src\out\ClipboardImage.h" />
+    <ClInclude Include="src\out\ClipboardText.h" />
+    <ClInclude Include="src\pin\PinWnd.h" />
+    <ClInclude Include="src\ocr\OcrService.h" />
+    <ClInclude Include="src\ocr\OcrResultWnd.h" />
+    <ClInclude Include="src\longshot\Stitcher.h" />
+    <ClInclude Include="src\longshot\FrameGrab.h" />
+    <ClInclude Include="src\longshot\LongShot.h" />
+  </ItemGroup>
+  <ItemGroup>
+    <ClCompile Include="src\stdafx.cpp">
+      <PrecompiledHeader>Create</PrecompiledHeader>
+    </ClCompile>
+    <ClCompile Include="src\Dpi.cpp" />
+    <ClCompile Include="src\TrayIcon.cpp" />
+    <ClCompile Include="src\HiddenWnd.cpp" />
+    <ClCompile Include="src\WinshotApp.cpp" />
+    <ClCompile Include="src\DesktopCapture.cpp" />
+    <ClCompile Include="src\session\SelectionModel.cpp" />
+    <ClCompile Include="src\session\Glyphs.cpp" />
+    <ClCompile Include="src\session\ToolbarWnd.cpp" />
+    <ClCompile Include="src\session\PropertyBarWnd.cpp" />
+    <ClCompile Include="src\session\OverlayWnd.cpp" />
+    <ClCompile Include="src\session\TextEditor.cpp" />
+    <ClCompile Include="src\session\Loupe.cpp" />
+    <ClCompile Include="src\session\CaptureSession.cpp" />
+    <ClCompile Include="src\session\MosaicCache.cpp" />
+    <ClCompile Include="src\annot\HandleGeom.cpp" />
+    <ClCompile Include="src\annot\Shapes.cpp" />
+    <ClCompile Include="src\annot\AnnotationList.cpp" />
+    <ClCompile Include="src\annot\Commands.cpp" />
+    <ClCompile Include="src\out\Compositor.cpp" />
+    <ClCompile Include="src\out\ExportPng.cpp" />
+    <ClCompile Include="src\out\ClipboardImage.cpp" />
+    <ClCompile Include="src\out\ClipboardText.cpp" />
+    <ClCompile Include="src\pin\PinWnd.cpp" />
+    <ClCompile Include="src\ocr\OcrService.cpp" />
+    <ClCompile Include="src\ocr\OcrResultWnd.cpp" />
+    <ClCompile Include="src\longshot\Stitcher.cpp">
+      <!-- Pure C++: its own header, no stdafx, so the unit test can build it alone. -->
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+    </ClCompile>
+    <ClCompile Include="src\longshot\FrameGrab.cpp" />
+    <ClCompile Include="src\longshot\LongShot.cpp" />
+  </ItemGroup>
+  <ItemGroup>
+    <None Include="app.manifest" />
+  </ItemGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
+</Project>
