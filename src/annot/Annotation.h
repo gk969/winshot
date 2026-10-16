@@ -39,6 +39,11 @@ public:
     // implies).
     virtual void Commit() {}
 
+    // The property bar's 粗细 and colour pickers. A shape that is already drawn
+    // and selected changes with them, so every kind that has an ink or a stroke
+    // width takes it; the ones that have neither ignore it.
+    virtual void SetStyle(Gdiplus::Color /*ink*/, Gdiplus::REAL /*pen*/) {}
+
     // Discarded on button up when true, so a stray click does not leave a
     // degenerate shape behind.
     virtual bool IsEmpty() const = 0;

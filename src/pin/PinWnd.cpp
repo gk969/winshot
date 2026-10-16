@@ -19,6 +19,7 @@ BEGIN_MESSAGE_MAP(CPinWnd, CWnd)
     ON_WM_NCHITTEST()
     ON_WM_NCLBUTTONDBLCLK()
     ON_WM_MOUSEWHEEL()
+    ON_WM_LBUTTONDOWN()
     ON_WM_MBUTTONDOWN()
     ON_WM_RBUTTONDOWN()
     ON_WM_KEYDOWN()
@@ -65,34 +66,53 @@ void CPinWnd::OnPaint() {
     // A white capture on a white page is invisible without some edge.
     Gdiplus::Pen edge(kEdge, 1.0f);
     g.DrawRectangle(&edge, 0, 0, cl.Width() - 1, cl.Height() - 1);
+
+    const CRect x = CloseRect();
+    if (x.IsRectEmpty()) return;
+    Gdiplus::SolidBrush bg(Gdiplus::Color(0xCC202124));
+    g.FillRectangle(&bg, (Gdiplus::REAL)x.left, (Gdiplus::REAL)x.top,
+                    (Gdiplus::REAL)x.Width(), (Gdiplus::REAL)x.Height());
+    Gdiplus::Pen cross(Gdiplus::Color(0xFFFFFFFF),
+                       std::max(1.5f, (Gdiplus::REAL)x.Width() * 0.07f));
+    cross.SetStartCap(Gdiplus::LineCapRound);
+    cross.SetEndCap(Gdiplus::LineCapRound);
+    const Gdiplus::REAL m = (Gdiplus::REAL)x.Width() * 0.28f;
+    g.DrawLine(&cross, (Gdiplus::REAL)x.left + m, (Gdiplus::REAL)x.top + m,
+               (Gdiplus::REAL)x.right - m, (Gdiplus::REAL)x.bottom - m);
+    g.DrawLine(&cross, (Gdiplus::REAL)x.right - m, (Gdiplus::REAL)x.top + m,
+               (Gdiplus::REAL)x.left + m, (Gdiplus::REAL)x.bottom - m);
+}
+
+// The ✕ badge in the top-right corner. It shrinks with a pin zoomed far down so
+// it never swallows the whole image, and gives up entirely on a pin too small to
+// aim at.
+CRect CPinWnd::CloseRect() const {
+    CRect cl;
+    GetClientRect(&cl);
+    const int pad = Dpi::S(GetSafeHwnd(), 5);
+    const int cap = std::min(cl.Width(), cl.Height()) / 3;
+    int s = Dpi::S(GetSafeHwnd(), 22);
+    if (s > cap) s = cap;
+    if (s < 10) return CRect(0, 0, 0, 0);
+    return CRect(cl.right - pad - s, cl.top + pad, cl.right - pad, cl.top + pad + s);
 }
 
 BOOL CPinWnd::OnEraseBkgnd(CDC*) {
     return TRUE;
 }
 
-// The whole client area drags the window; only the thin band at each edge
-// resizes, which is what makes a borderless window still feel like a window.
+// Everything but the ✕ drags the window. The ✕ is the one HTCLIENT spot, which
+// is what lets OnLButtonDown see the click at all.
 LRESULT CPinWnd::OnNcHitTest(CPoint pt) {
     CRect r;
     GetWindowRect(&r);
-    const int band = Dpi::S(GetSafeHwnd(), 8);
+    CRect x = CloseRect();
+    x.OffsetRect(r.TopLeft());
+    return x.PtInRect(pt) ? HTCLIENT : HTCAPTION;
+}
 
-    int x = 0, y = 0;
-    if (pt.x < r.left + band) x = -1;
-    else if (pt.x >= r.right - band) x = 1;
-    if (pt.y < r.top + band) y = -1;
-    else if (pt.y >= r.bottom - band) y = 1;
-
-    if (x < 0 && y < 0) return HTTOPLEFT;
-    if (x > 0 && y < 0) return HTTOPRIGHT;
-    if (x < 0 && y > 0) return HTBOTTOMLEFT;
-    if (x > 0 && y > 0) return HTBOTTOMRIGHT;
-    if (x < 0) return HTLEFT;
-    if (x > 0) return HTRIGHT;
-    if (y < 0) return HTTOP;
-    if (y > 0) return HTBOTTOM;
-    return HTCAPTION;
+void CPinWnd::OnLButtonDown(UINT, CPoint pt) {
+    if (CloseRect().PtInRect(pt)) ClosePin();
 }
 
 void CPinWnd::OnNcLButtonDblClk(UINT, CPoint) {

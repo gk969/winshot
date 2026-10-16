@@ -63,6 +63,7 @@ annot::Annotation* CaptureSession::AddAnnotation(
     m_annos.Add(std::move(a));
     m_undo.push_back(std::move(e));
     m_mosaic.Invalidate();
+    m_overlay.TouchBase();
     return raw;
 }
 
@@ -77,6 +78,7 @@ void CaptureSession::RemoveAnnotation(int idx) {
     m_undo.push_back(std::move(e));
 
     m_mosaic.Invalidate();
+    m_overlay.TouchBase();
     if (m_selIdx == idx) m_selIdx = -1;
     else if (m_selIdx > idx) --m_selIdx;
 }
@@ -90,6 +92,18 @@ void CaptureSession::RecordMove(int idx, std::unique_ptr<annot::Annotation> befo
     e.item = std::move(before);
     m_undo.push_back(std::move(e));
     m_mosaic.Invalidate();
+    m_overlay.TouchBase();
+}
+
+void CaptureSession::ApplyStyleToSelected() {
+    annot::Annotation* a = Selected();
+    if (!a) return;
+    const tb::Style& st = m_style;
+    a->SetStyle(st.Color(), (Gdiplus::REAL)st.PenWidth());
+    // A mosaic band is filled from the still plus the other shapes, so changing
+    // any shape's ink can change what a neighbouring band shows.
+    m_mosaic.Invalidate();
+    m_overlay.TouchBase();
 }
 
 void CaptureSession::Undo() {
@@ -99,7 +113,7 @@ void CaptureSession::Undo() {
     m_undo.pop_back();
     m_selIdx = annot::ApplyUndo(m_annos, std::move(e));
     m_mosaic.Invalidate();
-    if (m_overlay.GetSafeHwnd()) m_overlay.InvalidateRect(nullptr, FALSE);
+    m_overlay.TouchBase();
 }
 
 void CaptureSession::Accept() {
@@ -285,13 +299,13 @@ void CaptureSession::ShowTip(const wchar_t* text, CPoint anchor) {
     m_overlay.ScreenToClient(&anchor);
     m_tip.text = text;
     m_tip.anchor = anchor;
-    if (m_overlay.GetSafeHwnd()) m_overlay.InvalidateRect(nullptr, FALSE);
+    if (m_overlay.GetSafeHwnd()) m_overlay.TipChanged(&anchor);
 }
 
 void CaptureSession::HideTip() {
     if (m_tip.text.IsEmpty()) return;
     m_tip.text.Empty();
-    if (m_overlay.GetSafeHwnd()) m_overlay.InvalidateRect(nullptr, FALSE);
+    if (m_overlay.GetSafeHwnd()) m_overlay.TipChanged(nullptr);
 }
 
 void CaptureSession::Finish(bool accepted) {
@@ -339,6 +353,8 @@ void CaptureSession::EndLongShot(std::unique_ptr<Gdiplus::Bitmap> bmp, POINT anc
     m_sel->Reset(RECT{ off.x, off.y, off.x + m_capture->Width(),
                        off.y + m_capture->Height() });
     m_mosaic.Invalidate();
+    // The still itself was replaced by the stitched document.
+    m_overlay.TouchBase();
     // ChromeChanged, not Invalidate: the selection just grew, so the toolbar has
     // to move to its new bottom edge.
     m_overlay.ChromeChanged();

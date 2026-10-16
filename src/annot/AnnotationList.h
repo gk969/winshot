@@ -23,7 +23,9 @@ public:
     // Topmost annotation under pt, or nullptr.
     Annotation* TopAt(Gdiplus::PointF pt) const;
 
-    void DrawAll(Gdiplus::Graphics& g) const;
+    // `skip` leaves one shape out, for the overlay's cached canvas while that
+    // shape is being dragged: the drag redraws it in the chrome pass instead.
+    void DrawAll(Gdiplus::Graphics& g, const Annotation* skip = nullptr) const;
 
 private:
     std::vector<std::unique_ptr<Annotation>> m_items;

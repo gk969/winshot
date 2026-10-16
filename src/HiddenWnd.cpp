@@ -33,7 +33,7 @@ void CHiddenWnd::SetHotkeyAvailable(bool ok) {
     if (!ok)
         m_tray.ShowBalloon(L"WinShot",
                            L"快捷键 Ctrl+Shift+A 已被其他程序占用，"
-                           L"请从托盘菜单中选择“截图”。");
+                           L"请从托盘菜单中选择“开始截图”。");
 }
 
 LRESULT CHiddenWnd::WindowProc(UINT message, WPARAM wParam, LPARAM lParam) {
@@ -54,32 +54,18 @@ void CHiddenWnd::ReinstallTrayIcon() {
 }
 
 LRESULT CHiddenWnd::OnTrayNotify(WPARAM wParam, LPARAM lParam) {
-    // NOTIFYICON_VERSION_4: event id in the high word, x in the low word.
-    UINT event = HIWORD(lParam);
-    int x = LOWORD(lParam);
-    int y = (int)HIWORD(wParam);
-
-    switch (event) {
+    // Version 4 hands the event in the low word of lParam with the icon id above
+    // it, and the icon's screen point in wParam. Reading the event from the high
+    // word instead — which is the icon id — matches no case, so a real right
+    // click did nothing while a posted one looked fine.
+    switch (LOWORD(lParam)) {
     case NIN_SELECT:            // left single click
-    case WM_LBUTTONUP:
         ::PostMessageW(GetSafeHwnd(), WM_APP_STARTCAPTURE, 0, 0);
         break;
-    case WM_CONTEXTMENU:
-    case NIN_KEYSELECT: {
-        POINT pt;
-        if (event == WM_CONTEXTMENU) {
-            pt.x = (SHORT)LOWORD(wParam);
-            pt.y = (SHORT)HIWORD(wParam);
-            if (pt.x == -1 || pt.y == -1) {
-                RECT rc;
-                GetWindowRect(&rc);
-                pt.x = rc.left + 1;
-                pt.y = rc.top + 1;
-            }
-        } else {
-            pt.x = x;
-            pt.y = y;
-        }
+    case WM_CONTEXTMENU: {      // right click, and the menu key
+        POINT pt = { (SHORT)LOWORD(wParam), (SHORT)HIWORD(wParam) };
+        // wParam is 0 when the event has no point, i.e. keyboard activation.
+        if (!wParam) ::GetCursorPos(&pt);
         ShowTrayMenu(pt);
         break;
     }
@@ -109,12 +95,22 @@ LRESULT CHiddenWnd::OnOcrDone(WPARAM wParam, LPARAM) {
 }
 
 void CHiddenWnd::ShowTrayMenu(POINT ptScreen) {
+    // TrackPopupMenu runs its own modal loop and pumps another right click
+    // straight back into this handler, which would stack a second menu on the
+    // first and throw it back up the moment the choice came out.
+    if (m_menuUp) return;
+    m_menuUp = true;
+    struct Guard {
+        bool& f;
+        ~Guard() { f = false; }
+    } guard{ m_menuUp };
+
     CMenu menu;
     if (!menu.CreatePopupMenu()) return;
 
     CString captureLabel = m_hotkeyAvailable
-        ? CString(L"截图\tCtrl+Shift+A")
-        : CString(L"截图");
+        ? CString(L"开始截图\tCtrl+Shift+A")
+        : CString(L"开始截图");
     menu.AppendMenu(MF_STRING, IDM_TRAY_CAPTURE, captureLabel);
 
     menu.AppendMenu(MF_STRING | (IsRunOnStartup() ? MFS_CHECKED : MFS_UNCHECKED),
@@ -127,9 +123,21 @@ void CHiddenWnd::ShowTrayMenu(POINT ptScreen) {
 
     // Without this the menu never dismisses on an outside click.
     ::SetForegroundWindow(GetSafeHwnd());
-    ::TrackPopupMenu(menu.GetSafeHmenu(),
-                     TPM_BOTTOMALIGN | TPM_LEFTALIGN | TPM_RIGHTBUTTON | TPM_RETURNCMD,
-                     ptScreen.x, ptScreen.y, 0, GetSafeHwnd(), nullptr);
+    // TrackPopupMenu does not send these itself, and a window that never sees
+    // them has no menu loop for DefWindowProc to set up: the menu then draws
+    // itself but does not behave like a menu, which on a hidden window is
+    // exactly what a real right click produced while a posted event did not.
+    ::SendMessageW(GetSafeHwnd(), WM_ENTERMENULOOP, 0, 0);
+    ::SendMessageW(GetSafeHwnd(), WM_INITMENU, (WPARAM)menu.GetSafeHmenu(), 0);
+    // TPM_RETURNCMD means the choice comes back from the call rather than as a
+    // WM_COMMAND, so it has to be routed by hand; dropping it leaves every item
+    // inert. -1 is "dismissed without choosing", 0 is an error.
+    const int cmd = (int)::TrackPopupMenu(
+        menu.GetSafeHmenu(),
+        TPM_BOTTOMALIGN | TPM_LEFTALIGN | TPM_RIGHTBUTTON | TPM_RETURNCMD,
+        ptScreen.x, ptScreen.y, 0, GetSafeHwnd(), nullptr);
+    ::SendMessageW(GetSafeHwnd(), WM_EXITMENULOOP, 0, 0);
+    if (cmd > 0) OnTrayCommand((WPARAM)cmd);
     ::PostMessageW(GetSafeHwnd(), WM_NULL, 0, 0);
 }
 

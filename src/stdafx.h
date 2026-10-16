@@ -25,6 +25,7 @@
 #include <vector>
 
 #pragma comment(lib, "gdiplus.lib")
+#pragma comment(lib, "msimg32.lib")  // AlphaBlend, for the dim
 #pragma comment(lib, "shcore.lib")
 #pragma comment(lib, "shlwapi.lib")
 #pragma comment(lib, "imm32.lib")

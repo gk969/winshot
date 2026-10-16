@@ -8,12 +8,6 @@
 
 #include <algorithm>
 
-namespace {
-
-const wchar_t kFace[] = L"Microsoft YaHei UI";
-
-}  // namespace
-
 RECT loupe::CardRect(HWND hwnd, CPoint at, const CRect& bounds) {
     const int w = Dpi::S(hwnd, kBoxW);
     // The readout starts on the frame's bottom row, so the two boxes share it.
@@ -37,7 +31,8 @@ COLORREF loupe::Sampled(const DesktopCapture& cap, CPoint at, POINT off) {
     return RGB(c.GetRed(), c.GetGreen(), c.GetBlue());
 }
 
-void loupe::Draw(CaptureSession& session, CPoint at, Gdiplus::Graphics& g, const CRect& bounds) {
+void loupe::Draw(CaptureSession& session, CPoint at, Gdiplus::Graphics& g,
+                 const CRect& bounds, const Gdiplus::Font& font) {
     const HWND hwnd = session.Overlay().GetSafeHwnd();
     const int boxW = Dpi::S(hwnd, kBoxW), boxH = Dpi::S(hwnd, kBoxH);
     const int infoH = Dpi::S(hwnd, kInfoH);
@@ -100,9 +95,6 @@ void loupe::Draw(CaptureSession& session, CPoint at, Gdiplus::Graphics& g, const
     lines[2] = L"按c复制色号";
     lines[3] = L"鼠标右键自由截图";
 
-    Gdiplus::FontFamily family(kFace);
-    Gdiplus::Font font(&family, (Gdiplus::REAL)Dpi::S(hwnd, kInfoFont),
-                       Gdiplus::FontStyleRegular, Gdiplus::UnitPixel);
     g.SetTextRenderingHint(Gdiplus::TextRenderingHintAntiAliasGridFit);
     Gdiplus::StringFormat fmt;
     fmt.SetAlignment(Gdiplus::StringAlignmentNear);

@@ -32,5 +32,7 @@ private:
 
     CTrayIcon m_tray;
     bool m_hotkeyAvailable = true;
+    // True while TrackPopupMenu's modal loop is running.
+    bool m_menuUp = false;
     static UINT WM_TASKBARCREATED;
 };

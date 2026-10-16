@@ -10,6 +10,8 @@
 #include "Loupe.h"
 #include "AppMessages.h"
 
+#include <emmintrin.h>
+
 namespace {
 
 // Indexed by the eight-box handle order (top-left, top, top-right, right, ...),
@@ -87,6 +89,9 @@ BOOL COverlayWnd::Create(CaptureSession* session) {
 COverlayWnd::~COverlayWnd() {
     if (m_propbar.GetSafeHwnd()) m_propbar.DestroyWindow();
     if (m_toolbar.GetSafeHwnd()) m_toolbar.DestroyWindow();
+    m_base.Free();
+    m_chrome.Free();
+    m_out.Free();
 }
 
 void COverlayWnd::LayoutChrome() {
@@ -106,29 +111,234 @@ void COverlayWnd::ChromeChanged() {
     Invalidate();
 }
 
+// ---------------------------------------------------------------- DibCanvas
+
+bool DibCanvas::Reset(CSize s) {
+    if (bmp && size.cx == s.cx && size.cy == s.cy) return true;
+    Free();
+    if (s.cx <= 0 || s.cy <= 0) return false;
+
+    BITMAPINFO bi{};
+    bi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+    bi.bmiHeader.biWidth = s.cx;
+    bi.bmiHeader.biHeight = -s.cy;  // top-down, which is GDI+'s row order
+    bi.bmiHeader.biPlanes = 1;
+    bi.bmiHeader.biBitCount = 32;
+    bi.bmiHeader.biCompression = BI_RGB;
+    bmp = ::CreateDIBSection(nullptr, &bi, DIB_RGB_COLORS, &bits, nullptr, 0);
+    dc = ::CreateCompatibleDC(nullptr);
+    if (!bmp || !bits || !dc) {
+        Free();
+        return false;
+    }
+    ::SelectObject(dc, bmp);
+    gx = std::make_unique<Gdiplus::Bitmap>(s.cx, s.cy, s.cx * 4,
+                                           PixelFormat32bppARGB, (BYTE*)bits);
+    if (!gx || gx->GetLastStatus() != Gdiplus::Ok) {
+        Free();
+        return false;
+    }
+    size = s;
+    return true;
+}
+
+void DibCanvas::Free() {
+    gx.reset();  // the GDI+ face reads the bits, so it goes first
+    if (dc) ::DeleteDC(dc);
+    if (bmp) ::DeleteObject(bmp);
+    dc = nullptr;
+    bmp = nullptr;
+    bits = nullptr;
+    size = CSize(0, 0);
+}
+
+// ------------------------------------------------------------------- painting
+
 BOOL COverlayWnd::OnEraseBkgnd(CDC*) {
     return TRUE;  // OnPaint covers every pixel
 }
 
-void COverlayWnd::OnPaint() {
-    CPaintDC dc(this);
-    CRect cl;
-    GetClientRect(&cl);
-    if (cl.Width() <= 0 || cl.Height() <= 0) return;
-
-    Gdiplus::Bitmap back(cl.Width(), cl.Height(), PixelFormat32bppARGB);
-    {
-        Gdiplus::Graphics g(&back);
-        DrawScene(g);
-    }
-    {
-        Gdiplus::Graphics g(dc.GetSafeHdc());
-        g.SetInterpolationMode(Gdiplus::InterpolationModeNearestNeighbor);
-        g.DrawImage(&back, 0, 0, cl.Width(), cl.Height());
-    }
+void COverlayWnd::TouchBase() {
+    m_baseDirty = true;
+    if (GetSafeHwnd()) InvalidateRect(nullptr, FALSE);
 }
 
-void COverlayWnd::DrawScene(Gdiplus::Graphics& g) {
+void COverlayWnd::TouchBaseIn(const CRect& r) {
+    m_baseDirty = true;
+    InvalidatePart(r);
+}
+
+// An in-place drag draws its shape in the chrome instead of under the dim, so
+// the base has to stop drawing it the moment the drag starts. Without this the
+// old position sits under the moving copy for the whole drag and only goes away
+// when the button comes up.
+void COverlayWnd::DropFromBase(const annot::Annotation& a) {
+    m_baseDirty = true;
+    InvalidateAnnoChange(&a, AnnoRect(&a));
+}
+
+namespace {
+// Costs one getenv the first time and nothing after that; the probe run sets the
+// variable and every other run pays a branch.
+bool ProbeOn() {
+    static const bool on =
+        ::GetEnvironmentVariableW(L"WINSHOT_PAINTLOG", nullptr, 0) > 0;
+    return on;
+}
+LONGLONG ProbeTicks() {
+    LARGE_INTEGER t;
+    ::QueryPerformanceCounter(&t);
+    return t.QuadPart;
+}
+LONGLONG ProbeFreq() {
+    static LARGE_INTEGER f = [] {
+        LARGE_INTEGER r;
+        ::QueryPerformanceFrequency(&r);
+        return r;
+    }();
+    return f.QuadPart;
+}
+// Start/stop stamps for one paint: duration, update-region area, the gap since
+// the previous paint started, and the wait from the last mouse move to this paint.
+LONGLONG g_probeStart = 0, g_probePaintStart = 0, g_probeLastMove = 0;
+class PaintProbe;
+PaintProbe* g_probeCur = nullptr;
+class PaintProbe {
+public:
+    PaintProbe() {
+        if (!ProbeOn()) return;
+        on = true;
+        g_probeCur = this;
+        t0 = ProbeTicks();
+        gap = g_probeStart ? t0 - g_probeStart : 0;
+        wait = g_probeLastMove ? t0 - g_probeLastMove : 0;
+        g_probeStart = t0;
+        g_probePaintStart = t0;
+    }
+    ~PaintProbe() {
+        if (!on) return;
+        static FILE* log = []() -> FILE* {
+            FILE* f = nullptr;
+            if (::fopen_s(&f, "D:\\Project\\winshot\\obj\\paint.log", "w") != 0)
+                return nullptr;
+            return f;
+        }();
+        if (!log) return;
+        g_probeCur = nullptr;
+        std::fprintf(log,
+                     "%lld %ld %ld %lld %lld %d"
+                     " %lld %lld %lld %lld %lld %lld %lld %lld %lld\n",
+                     ProbeTicks() - t0, area.cx, area.cy, gap, wait, base ? 1 : 0,
+                     mark[0], mark[1], mark[2], mark[3], mark[4],
+                     mark[5], mark[6], mark[7], mark[8]);
+        std::fflush(log);
+    }
+    CSize area{};
+    bool base = false;
+    // Absolute offsets from the paint's start, in chronological order; the report
+    // differences them: begin, base, blit, dim, annos, frame+labels, loupe,
+    // blend, end.
+    void Mark(int i) {
+        if (!on) return;
+        mark[i] = ProbeTicks() - t0;
+    }
+
+private:
+    bool on = false;
+    LONGLONG t0 = 0, gap = 0, wait = 0;
+    LONGLONG mark[9]{};
+};
+void ProbeMark(int i) {
+    if (g_probeCur) g_probeCur->Mark(i);
+}
+}  // namespace
+
+void COverlayWnd::OnPaint() {
+    // BeginPaint/EndPaint rather than CPaintDC: rcPaint is the only way to learn
+    // the update region once BeginPaint has validated it. BeginPaint empties the
+    // region, so its actual shape — which for a selection drag is a thin ring
+    // whose bounding rect is nearly the whole screen — has to be taken first.
+    PaintProbe probe;
+    HRGN upd = ::CreateRectRgn(0, 0, 0, 0);
+    const BOOL haveUpd = upd && ::GetUpdateRgn(GetSafeHwnd(), upd, FALSE);
+    PAINTSTRUCT ps;
+    HDC hdc = ::BeginPaint(GetSafeHwnd(), &ps);
+    if (!hdc) {
+        if (upd) ::DeleteObject(upd);
+        return;
+    }
+    probe.area = CSize(ps.rcPaint.right - ps.rcPaint.left,
+                       ps.rcPaint.bottom - ps.rcPaint.top);
+    probe.Mark(0);
+
+    CRect cl;
+    GetClientRect(&cl);
+    if (m_base.Reset(cl.Size()) && m_chrome.Reset(cl.Size()) &&
+        m_out.Reset(cl.Size())) {
+        // The DC is clipped to the update region; its bounding rect is the only
+        // part of the cache that can be out of date.
+        const CRect up(ps.rcPaint.left, ps.rcPaint.top, ps.rcPaint.right,
+                       ps.rcPaint.bottom);
+        const Gdiplus::Rect uc(up.left, up.top, up.Width(), up.Height());
+        probe.base = m_baseDirty;
+        if (m_baseDirty) {
+            {
+                Gdiplus::Graphics bg(m_base.gx.get());
+                bg.SetClip(uc);
+                DrawBase(bg);
+            }
+            m_baseDirty = false;
+        }
+        probe.Mark(1);
+        // DWM composites a GDI window's surface whenever the vsync lands, and a
+        // paint that hands the window its parts one at a time can be caught
+        // between them: the still up, the dim and the chrome not yet, which is
+        // the whole screen flashing for a frame. The base alone is a fifth of a
+        // full repaint, so there is a real window for that. Everything below
+        // therefore assembles the frame in m_out, and one blit carries it.
+        ::SelectClipRgn(m_out.dc, haveUpd ? upd : nullptr);
+        ::BitBlt(m_out.dc, up.left, up.top, up.Width(), up.Height(), m_base.dc,
+                 up.left, up.top, SRCCOPY);
+        probe.Mark(2);
+        DrawDim(m_out, up);
+        probe.Mark(3);
+
+        // The chrome goes through a memory DIB and reaches the frame as a blend.
+        // GDI+ charges ~0.35ms per call onto a window DC whatever it draws — the
+        // frame, the two cards and the magnifier were 7ms of twenty-odd calls on
+        // a small repaint and 28ms on a full-screen one — against 0.2ms for the
+        // same calls here. Each element clears and registers its own rect as it
+        // clips to it, so only the ground it can actually ink is blended.
+        m_chromeInk.clear();
+        {
+            Gdiplus::Graphics g(m_chrome.gx.get());
+            g.SetClip(uc);
+            DrawChrome(g);
+        }
+        BLENDFUNCTION fn{};
+        fn.BlendOp = AC_SRC_OVER;
+        fn.SourceConstantAlpha = 0xFF;
+        fn.AlphaFormat = AC_SRC_ALPHA;
+        for (const CRect& r : m_chromeInk) {
+            CRect q;
+            if (q.IntersectRect(r, up) == FALSE || q.IsRectEmpty()) continue;
+            ::AlphaBlend(m_out.dc, q.left, q.top, q.Width(), q.Height(),
+                         m_chrome.dc, q.left, q.top, q.Width(), q.Height(), fn);
+        }
+        probe.Mark(7);
+        // The window's own clip is the same region, so this writes exactly the
+        // pixels that were asked for and nothing else — and it writes them once,
+        // with the dim and the chrome already in them.
+        ::SelectClipRgn(m_out.dc, nullptr);
+        ::BitBlt(hdc, up.left, up.top, up.Width(), up.Height(), m_out.dc,
+                 up.left, up.top, SRCCOPY);
+    }
+    ::EndPaint(GetSafeHwnd(), &ps);
+    if (upd) ::DeleteObject(upd);
+    probe.Mark(8);
+}
+
+void COverlayWnd::DrawBase(Gdiplus::Graphics& g) {
     const DesktopCapture& cap = m_session->Capture();
     // The still normally starts at this window's own corner; after 编辑 hands
     // back a stitched image it starts at the selection instead.
@@ -142,44 +352,308 @@ void COverlayWnd::DrawScene(Gdiplus::Graphics& g) {
     // 2px outside the selection instead of straddling its edge.
     g.SetPixelOffsetMode(Gdiplus::PixelOffsetModeNone);
 
-    RECT s = m_session->Sel().Rect();
-    CRect cl;
-    GetClientRect(&cl);
+    // Not clipped to the selection: the selection is what changes most often,
+    // and tying the cache to it would rebuild the screen on every drag. Ink
+    // outside the selection still gets dimmed below, and the export crops it.
+    m_session->Annos().DrawAll(g, MovingAnno());
+}
 
-    const Gdiplus::REAL l = (Gdiplus::REAL)cl.left, t = (Gdiplus::REAL)cl.top;
-    const Gdiplus::REAL rr = (Gdiplus::REAL)cl.right, b = (Gdiplus::REAL)cl.bottom;
-    const Gdiplus::REAL sl = (Gdiplus::REAL)s.left, st = (Gdiplus::REAL)s.top;
-    const Gdiplus::REAL sr = (Gdiplus::REAL)s.right, sb = (Gdiplus::REAL)s.bottom;
+// Each chrome element takes a clip of its own. The clip is also the rect its ink
+// can reach, which is what lets ClipTo clear and register only that much of the
+// buffer instead of the whole update region — 3.5M pixels of clear and blend to
+// move ink that fits in two cards, a ring and a magnifier.
+namespace {
+// Where an annotation can put ink down, plus the ring of selection handles drawn
+// around it.
+Gdiplus::RectF InkedBox(const annot::Annotation* a, Gdiplus::REAL pad) {
+    if (!a) return Gdiplus::RectF(0, 0, 0, 0);
+    const Gdiplus::RectF b = a->BBox();
+    return Gdiplus::RectF(b.X - pad, b.Y - pad, b.Width + 2 * pad,
+                          b.Height + 2 * pad);
+}
 
-    Gdiplus::SolidBrush dim(kDim);
-    if (st > t)
-        g.FillRectangle(&dim, l, t, rr - l, st - t);
-    if (sb < b)
-        g.FillRectangle(&dim, l, sb, rr - l, b - sb);
-    if (sl > l)
-        g.FillRectangle(&dim, l, st, sl - l, sb - st);
-    if (sr < rr)
-        g.FillRectangle(&dim, sr, st, rr - sr, sb - st);
+class ClipTo {
+public:
+    // The rect is where the element can put ink, so it is both the clip and the
+    // only part of the chrome buffer the blend has to carry. Clearing and
+    // blending the whole update region instead costs 5.5ms a frame to move ink
+    // that fits in two cards, a ring and a magnifier: the region is 3.5M pixels
+    // and the chrome's own ink is well under a tenth of it.
+    ClipTo(Gdiplus::Graphics& g, const Gdiplus::RectF& r, std::vector<CRect>* ink)
+        : m_g(g), m_state(g.Save()) {
+        g.SetClip(r, Gdiplus::CombineModeIntersect);
+        if (!ink) return;
+        // The buffer still holds this rect's ink from whenever it was last
+        // drawn, and anything outside the element's new position would show
+        // through as a ghost. SourceCopy with a transparent colour zeroes alpha
+        // along with the colour, which is what drops the untouched pixels of the
+        // rect out of the blend.
+        const Gdiplus::CompositingMode cm = g.GetCompositingMode();
+        g.SetCompositingMode(Gdiplus::CompositingModeSourceCopy);
+        Gdiplus::SolidBrush clear(0x00000000);
+        g.FillRectangle(&clear, r.X, r.Y, r.Width, r.Height);
+        g.SetCompositingMode(cm);
+        ink->push_back(CRect((int)std::floor(r.X), (int)std::floor(r.Y),
+                             (int)std::ceil(r.X + r.Width),
+                             (int)std::ceil(r.Y + r.Height)));
+    }
+    ~ClipTo() { m_g.Restore(m_state); }
+
+private:
+    Gdiplus::Graphics& m_g;
+    Gdiplus::GraphicsState m_state;
+};
+
+// For an element whose ink is a band rather than a box: the selection frame. Its
+// clip has to be the box the band fits in, but the clear and the blend are the
+// four strips themselves. Clearing the box wipes the annotations drawn inside it
+// a moment earlier, and blending the box drags their stale ink out of the buffer
+// wherever they no longer are — which is how a dragged shape loses its selection
+// ring, how a shape being drawn stays invisible until the button comes up, and
+// how a ghost reappears at the spot a shape was dragged away from.
+class ClipBand {
+public:
+    ClipBand(Gdiplus::Graphics& g, const Gdiplus::RectF& outer,
+             const Gdiplus::RectF& inner, std::vector<CRect>* ink)
+        : m_g(g), m_state(g.Save()) {
+        g.SetClip(outer, Gdiplus::CombineModeIntersect);
+        const float ol = outer.X, ot = outer.Y;
+        const float orr = outer.X + outer.Width, ob = outer.Y + outer.Height;
+        const float il = inner.X, it = inner.Y;
+        const float ir = inner.X + inner.Width, ib = inner.Y + inner.Height;
+        const Gdiplus::RectF strip[4] = {
+            Gdiplus::RectF(ol, ot, orr - ol, it - ot),
+            Gdiplus::RectF(ol, ib, orr - ol, ob - ib),
+            Gdiplus::RectF(ol, it, il - ol, ib - it),
+            Gdiplus::RectF(ir, it, orr - ir, ib - it),
+        };
+        const Gdiplus::CompositingMode cm = g.GetCompositingMode();
+        g.SetCompositingMode(Gdiplus::CompositingModeSourceCopy);
+        Gdiplus::SolidBrush clear(0x00000000);
+        for (const Gdiplus::RectF& q : strip) {
+            if (q.Width <= 0.0f || q.Height <= 0.0f) continue;
+            g.FillRectangle(&clear, q.X, q.Y, q.Width, q.Height);
+            if (ink)
+                ink->push_back(CRect((int)std::floor(q.X), (int)std::floor(q.Y),
+                                     (int)std::ceil(q.X + q.Width),
+                                     (int)std::ceil(q.Y + q.Height)));
+        }
+        g.SetCompositingMode(cm);
+    }
+    ~ClipBand() { m_g.Restore(m_state); }
+
+private:
+    Gdiplus::Graphics& m_g;
+    Gdiplus::GraphicsState m_state;
+};
+}  // namespace
+
+void COverlayWnd::DrawChrome(Gdiplus::Graphics& g) {
+    g.SetInterpolationMode(Gdiplus::InterpolationModeNearestNeighbor);
+    g.SetPixelOffsetMode(Gdiplus::PixelOffsetModeNone);
+
+    // The dim went on with GDI before this Graphics existed; everything from
+    // here is GDI+.
 
     // Annotations live in the same space as the still, so they need only a clip
     // to the selection — and they sit above the dim, as in 矩形-鼠标拖动画矩形.png.
+    RECT s = m_session->Sel().Rect();
     const Gdiplus::GraphicsState gs = g.Save();
-    g.SetClip(Gdiplus::RectF(sl, st, sr - sl, sb - st));
-    m_session->Annos().DrawAll(g);
-    if (m_pending) m_pending->Draw(g);
-    if (annot::Annotation* a = m_session->Selected())
-        annot::DrawSelection(g, *a, (Gdiplus::REAL)AnnoHandleRadius());
+    g.SetClip(Gdiplus::RectF((Gdiplus::REAL)s.left, (Gdiplus::REAL)s.top,
+                             (Gdiplus::REAL)(s.right - s.left),
+                             (Gdiplus::REAL)(s.bottom - s.top)));
+    const Gdiplus::REAL hpad = (Gdiplus::REAL)(AnnoHandleRadius() + 3);
+    // The shape being dragged and the ring that marks it selected are the same
+    // annotation, and a shape still being drawn may sit out beside them. They
+    // share one clip: ClipTo clears the rect it clips, so clipping each on its
+    // own would have the ring's clear drop the shape it belongs to.
+    annot::Annotation* moving = MovingAnno();
+    annot::Annotation* sel = m_session->Selected();
+    annot::Annotation* inked[3] = { moving, m_pending.get(), sel };
+    float il = 0, it = 0, ir = 0, ib = 0;
+    bool any = false;
+    for (annot::Annotation* a : inked) {
+        if (!a) continue;
+        const Gdiplus::RectF q = InkedBox(a, hpad);
+        if (!any) {
+            il = q.X; it = q.Y; ir = q.X + q.Width; ib = q.Y + q.Height;
+            any = true;
+            continue;
+        }
+        il = std::min(il, q.X);
+        it = std::min(it, q.Y);
+        ir = std::max(ir, q.X + q.Width);
+        ib = std::max(ib, q.Y + q.Height);
+    }
+    if (any) {
+        ClipTo c(g, Gdiplus::RectF(il, it, ir - il, ib - it), &m_chromeInk);
+        if (moving) moving->Draw(g);
+        if (m_pending) m_pending->Draw(g);
+        if (sel) annot::DrawSelection(g, *sel, (Gdiplus::REAL)AnnoHandleRadius());
+    }
     g.Restore(gs);
+    ProbeMark(4);
 
     DrawSelectionFrame(g);
     // The stitched tail hangs beside the hole, which is the one part of the
-    // selection area this window still paints.
-    if (InLongShot()) m_session->PaintLongShot(g);
+    // selection area this window still paints. It has no rect of its own to
+    // offer, so 长截图 keeps paying for the whole region.
+    if (InLongShot()) {
+        CRect cl;
+        GetClientRect(&cl);
+        m_chromeInk.push_back(cl);
+        m_session->PaintLongShot(g);
+    }
     DrawSizeLabel(g);
     DrawTip(g);
     DrawEditFrame(g);
     DrawFontDropdown(g);
+    ProbeMark(5);
     DrawLoupe(g);
+    ProbeMark(6);
+}
+
+// Blending opaque black at alpha a over the ground leaves ground*(255-a)/255,
+// which is a scale of each colour byte. Doing that with AlphaBlend would be the
+// obvious move and was, until the frame had to be assembled in memory: GDI
+// accelerates the blend onto a window DC and not onto a DIB section, and the
+// same full-screen dim costs 0.1ms on one against 40ms on the other. So it runs
+// over the bits here instead. The alpha byte is left alone.
+static void DimBits(void* base, int stride, const CRect& r, int a) {
+    const unsigned k = ((255 - a) << 16) / 255 + 1;  // v*k>>16 == v*(255-a)/255
+    const __m128i mk = _mm_set1_epi16((short)k);
+    const __m128i zero = _mm_setzero_si128();
+    const __m128i alpha = _mm_set1_epi32((int)0xFF000000);
+
+    BYTE* row = (BYTE*)base + (size_t)r.top * stride;
+    for (int y = r.top; y < r.bottom; ++y, row += stride) {
+        BYTE* p = row + (size_t)r.left * 4;
+        for (int n = r.Width(); n >= 4; n -= 4, p += 16) {
+            const __m128i src = _mm_loadu_si128((const __m128i*)p);
+            const __m128i lo = _mm_mulhi_epu16(_mm_unpacklo_epi8(src, zero), mk);
+            const __m128i hi = _mm_mulhi_epu16(_mm_unpackhi_epi8(src, zero), mk);
+            const __m128i dim = _mm_packus_epi16(lo, hi);
+            _mm_storeu_si128((__m128i*)p, _mm_or_si128(_mm_andnot_si128(alpha, dim),
+                                                       _mm_and_si128(alpha, src)));
+        }
+        for (int n = r.Width() & 3; n > 0; --n, p += 4)
+            for (int c = 0; c < 3; ++c) p[c] = (BYTE)((p[c] * k) >> 16);
+    }
+}
+
+void COverlayWnd::DrawDim(const DibCanvas& out, const CRect& lim) {
+    RECT s = m_session->Sel().Rect();
+    CRect cl;
+    GetClientRect(&cl);
+
+    CRect strips[4];
+    int n = 0;
+    // The default selection is the whole screen, so the four strips below all
+    // collapse and the summoned screen would look undimmed until the first
+    // drag. Until the user has picked something the dim covers the selection
+    // too, so the hotkey visibly darkens the desktop at once.
+    if (!InLongShot() && m_session->Sel().IsDefault()) {
+        strips[n++] = cl;
+    } else {
+        if (s.top > cl.top) strips[n++] = CRect(cl.left, cl.top, cl.right, s.top);
+        if (s.bottom < cl.bottom)
+            strips[n++] = CRect(cl.left, s.bottom, cl.right, cl.bottom);
+        if (s.left > cl.left) strips[n++] = CRect(cl.left, s.top, s.left, s.bottom);
+        if (s.right < cl.right)
+            strips[n++] = CRect(s.right, s.top, cl.right, s.bottom);
+    }
+
+    // Clipped to the update rect rather than to the region: the parts of a strip
+    // outside it are read by the blit out but never reach the window, so writing
+    // them costs a little time and nothing else.
+    for (int i = 0; i < n; ++i) {
+        CRect q;
+        if (q.IntersectRect(strips[i], lim) == FALSE) continue;
+        DimBits(out.bits, out.size.cx * 4, q, kDim.GetA());
+    }
+}
+
+annot::Annotation* COverlayWnd::MovingAnno() const {
+    return (m_mode == Mode::MoveAnno || m_mode == Mode::DragHandle) ? m_anno
+                                                                    : nullptr;
+}
+
+std::unique_ptr<Gdiplus::Font> COverlayWnd::UiFont(int px) const {
+    Gdiplus::FontFamily family(kFontFace);
+    return std::make_unique<Gdiplus::Font>(
+        &family, (Gdiplus::REAL)px, Gdiplus::FontStyleRegular, Gdiplus::UnitPixel);
+}
+
+// ------------------------------------------------------------- dirty regions
+
+CRect COverlayWnd::AnnoRect(const annot::Annotation* a) {
+    if (!a) return CRect(0, 0, 0, 0);
+    const Gdiplus::RectF b = a->BBox();
+    return CRect((int)std::floor(b.X), (int)std::floor(b.Y),
+                 (int)std::ceil(b.X + b.Width), (int)std::ceil(b.Y + b.Height));
+}
+
+void COverlayWnd::InvalidatePart(const CRect& r) {
+    CRect cl, w(r);
+    GetClientRect(&cl);
+    if (w.IntersectRect(w, cl) == FALSE || w.IsRectEmpty()) return;
+    InvalidateRect(&w, FALSE);
+}
+
+// The ring of pixels just inside and outside the edge of `r`. Filling the whole
+// box instead charges its interior to every frame: a 30px step of a 2000x1500
+// selection unioned to 3.6M pixels of blit, dim and blend per mouse move, which
+// is what left the frame two moves behind the cursor and made it flicker.
+void COverlayWnd::InvalidateRing(const CRect& r, int pad) {
+    InvalidatePart(CRect(r.left - pad, r.top - pad, r.right + pad, r.top + pad));
+    InvalidatePart(CRect(r.left - pad, r.bottom - pad, r.right + pad,
+                         r.bottom + pad));
+    InvalidatePart(CRect(r.left - pad, r.top + pad, r.left + pad, r.bottom - pad));
+    InvalidatePart(CRect(r.right - pad, r.top + pad, r.right + pad,
+                         r.bottom - pad));
+}
+
+// The part of `a` that `b` does not cover, as up to four strips. Anything that
+// inked in there has to be painted back, and a dim hole that `a` cut but `b` no
+// longer does has to go dark again.
+void COverlayWnd::InvalidateOutside(const CRect& a, const CRect& b) {
+    InvalidatePart(CRect(a.left, a.top, a.right, std::min(a.bottom, b.top)));
+    InvalidatePart(CRect(a.left, std::max(a.top, b.bottom), a.right, a.bottom));
+    const int t = std::max(a.top, b.top), btm = std::min(a.bottom, b.bottom);
+    InvalidatePart(CRect(a.left, t, std::min(a.right, b.left), btm));
+    InvalidatePart(CRect(std::max(a.left, b.right), t, a.right, btm));
+}
+
+void COverlayWnd::InvalidateSelChange(const RECT& before) {
+    const CRect was(before);
+    const CRect now(m_session->Sel().Rect());
+    // The 2px frame and the squares on its edges and corners, and the size card
+    // that hangs 24px above the top edge — all of them within this ring.
+    const int pad = Dpi::S(GetSafeHwnd(), 26);
+    InvalidateRing(was, pad);
+    InvalidateRing(now, pad);
+    // The hole the selection cuts in the dim: only the strip where it opened or
+    // closed changed brightness.
+    InvalidateOutside(was, now);
+    InvalidateOutside(now, was);
+}
+
+void COverlayWnd::InvalidateAnnoChange(const annot::Annotation* a,
+                                       const CRect& before) {
+    const CRect now = AnnoRect(a);
+    // Pen width and the handle rings, which the bounding box does not cover.
+    const int pad = Dpi::S(GetSafeHwnd(), 12);
+    // A shape's ink can be anywhere inside its box, not just on its edge: an
+    // ellipse's curve sweeps the interior, an arrow's shaft is a diagonal across
+    // it, a pen stroke is wherever the hand went. So the ground a change can
+    // have altered is both boxes entire. Rings plus the strips outside them —
+    // what the selection's band-shaped ink needs — leave each box's interior
+    // unblended, which is how an arrow loses its head and a curve its middle
+    // while the button is down, and how a dragged ellipse smears along the path.
+    CRect dirty(before);
+    dirty.UnionRect(dirty, now);
+    dirty.InflateRect(pad, pad);
+    InvalidatePart(dirty);
 }
 
 // 默认选择全屏,周围有蓝框.png: the magnifier rides with the cursor while no tool
@@ -188,7 +662,10 @@ void COverlayWnd::DrawScene(Gdiplus::Graphics& g) {
 bool COverlayWnd::LoupeCursor(CPoint* at) const {
     if (InLongShot()) return false;
     if (m_session->ActiveTool() != tb::Id::None || m_session->Editor()) return false;
-    if (m_mode == Mode::MoveAnno || m_mode == Mode::DragHandle) return false;
+    // The card is there to help pick where the 选区 starts and to read a colour
+    // off the still. Once the user has dragged one out it has done its job, and
+    // while a button is down it follows the drag across the region being drawn.
+    if (m_selPicked || m_mode != Mode::Idle) return false;
 
     CPoint p;
     if (!::GetCursorPos(&p)) return false;
@@ -214,15 +691,62 @@ bool COverlayWnd::LoupeCursor(CPoint* at) const {
 void COverlayWnd::DrawLoupe(Gdiplus::Graphics& g) {
     CPoint at;
     m_loupeShown = LoupeCursor(&at);
-    if (!m_loupeShown) return;
+    if (!m_loupeShown) {
+        m_loupeRect.SetRectEmpty();
+        return;
+    }
     CRect cl;
     GetClientRect(&cl);
-    loupe::Draw(*m_session, at, g, cl);
+    const RECT card = loupe::CardRect(GetSafeHwnd(), at, cl);
+    m_loupeRect = CRect(card.left, card.top, card.right, card.bottom);
+    if (!m_loupeFont)
+        m_loupeFont = UiFont(Dpi::S(GetSafeHwnd(), loupe::kInfoFont));
+    if (m_loupeFont) {
+        ClipTo clip(g, Gdiplus::RectF((Gdiplus::REAL)m_loupeRect.left - 1,
+                                      (Gdiplus::REAL)m_loupeRect.top - 1,
+                                      (Gdiplus::REAL)(m_loupeRect.Width() + 2),
+                                      (Gdiplus::REAL)(m_loupeRect.Height() + 2)),
+                           &m_chromeInk);
+        loupe::Draw(*m_session, at, g, cl, *m_loupeFont);
+    }
+}
+
+void COverlayWnd::InvalidateLoupe() {
+    CPoint at;
+    const bool show = LoupeCursor(&at);
+
+    // Both the card's old place, which the blit has to put the scene back over,
+    // and its new one.
+    CRect dirty = m_loupeRect;
+    if (show) {
+        CRect cl;
+        GetClientRect(&cl);
+        const RECT card = loupe::CardRect(GetSafeHwnd(), at, cl);
+        dirty.UnionRect(dirty, CRect(card.left, card.top, card.right, card.bottom));
+    }
+    dirty.InflateRect(2, 2);
+    InvalidatePart(dirty);
 }
 
 void COverlayWnd::CursorMoved() {
     CPoint at;
-    if (LoupeCursor(&at) || m_loupeShown) InvalidateRect(nullptr, FALSE);
+    if (!LoupeCursor(&at) && !m_loupeShown) return;
+    InvalidateLoupe();
+}
+
+void COverlayWnd::TipChanged(const CPoint* anchor) {
+    // The card that was there has to be repainted over, and the new one has room
+    // to land either side of its anchor (it flips above when the bottom would
+    // cut it off). Its exact size needs the text measured, which is a paint-time
+    // job, so this is a box wide enough for any of the bar's tips instead.
+    CRect dirty = m_tipRect;
+    if (anchor) {
+        const int w = Dpi::S(GetSafeHwnd(), 440);
+        const int h = Dpi::S(GetSafeHwnd(), 90);
+        dirty.UnionRect(dirty, CRect(anchor->x - w / 2, anchor->y - h,
+                                     anchor->x + w / 2, anchor->y + h));
+    }
+    if (!dirty.IsRectEmpty()) InvalidatePart(dirty);
 }
 
 // 文字-点击位置-输入时红色文本框.png: the live edit is a bare CEdit and the
@@ -234,6 +758,11 @@ void COverlayWnd::DrawEditFrame(Gdiplus::Graphics& g) {
     CRect r = ed->Frame();
     const int pad = Dpi::S(GetSafeHwnd(), 2);
     r.InflateRect(pad, pad);
+    ClipTo frame(g, Gdiplus::RectF((Gdiplus::REAL)(r.left - 1),
+                                   (Gdiplus::REAL)(r.top - 1),
+                                   (Gdiplus::REAL)(r.Width() + 2),
+                                   (Gdiplus::REAL)(r.Height() + 2)),
+                        &m_chromeInk);
 
     Gdiplus::Pen pen(kEditFrame, 1.0f);
     g.DrawRectangle(&pen, (Gdiplus::REAL)r.left + 0.5f, (Gdiplus::REAL)r.top + 0.5f,
@@ -245,6 +774,11 @@ void COverlayWnd::DrawEditFrame(Gdiplus::Graphics& g) {
 void COverlayWnd::DrawFontDropdown(Gdiplus::Graphics& g) {
     const CRect* d = m_session->FontDropdown();
     if (!d) return;
+    ClipTo drop(g, Gdiplus::RectF((Gdiplus::REAL)d->left - 1,
+                                  (Gdiplus::REAL)d->top - 1,
+                                  (Gdiplus::REAL)(d->Width() + 2),
+                                  (Gdiplus::REAL)(d->Height() + 2)),
+                       &m_chromeInk);
 
     const HWND hwnd = GetSafeHwnd();
     const int row = Dpi::S(hwnd, tb::kFontRow);
@@ -255,9 +789,8 @@ void COverlayWnd::DrawFontDropdown(Gdiplus::Graphics& g) {
     g.FillRectangle(&back, (Gdiplus::REAL)d->left, (Gdiplus::REAL)d->top,
                     (Gdiplus::REAL)d->Width(), (Gdiplus::REAL)d->Height());
 
-    Gdiplus::FontFamily family(kFontFace);
-    Gdiplus::Font font(&family, (Gdiplus::REAL)Dpi::S(hwnd, 13),
-                       Gdiplus::FontStyleRegular, Gdiplus::UnitPixel);
+    if (!m_dropFont) m_dropFont = UiFont(Dpi::S(hwnd, 13));
+    if (!m_dropFont) return;
     g.SetTextRenderingHint(Gdiplus::TextRenderingHintAntiAliasGridFit);
     Gdiplus::StringFormat fmt;
     fmt.SetAlignment(Gdiplus::StringAlignmentNear);
@@ -275,7 +808,7 @@ void COverlayWnd::DrawFontDropdown(Gdiplus::Graphics& g) {
         CString s;
         s.Format(L"%d", tb::kFontSizes[i]);
         Gdiplus::SolidBrush fg(on ? Gdiplus::Color(0xFFFFFFFF) : tb::kInk);
-        g.DrawString(s, -1, &font,
+        g.DrawString(s, -1, m_dropFont.get(),
                      Gdiplus::RectF((Gdiplus::REAL)(d->left + pad), y,
                                     (Gdiplus::REAL)d->Width() - 2 * pad,
                                     (Gdiplus::REAL)row),
@@ -301,6 +834,21 @@ void COverlayWnd::DrawSelectionFrame(Gdiplus::Graphics& g) {
     int h = s.bottom - s.top;
     if (w <= 0 || h <= 0) return;
 
+    int hs = Dpi::S(GetSafeHwnd(), 7);
+    if ((hs & 1) == 0) ++hs;
+    const int off = hs / 2;  // odd size + integer offset centres the square
+    // The 2px pen straddles the edge and the handle squares stick out by off, so
+    // the frame's own damage is a band this wide around the selection.
+    ClipBand band(g, Gdiplus::RectF((Gdiplus::REAL)(s.left - hs),
+                                    (Gdiplus::REAL)(s.top - hs),
+                                    (Gdiplus::REAL)(w + 2 * hs),
+                                    (Gdiplus::REAL)(h + 2 * hs)),
+                  Gdiplus::RectF((Gdiplus::REAL)(s.left + off),
+                                 (Gdiplus::REAL)(s.top + off),
+                                 (Gdiplus::REAL)(w - 2 * off),
+                                 (Gdiplus::REAL)(h - 2 * off)),
+                  &m_chromeInk);
+
     if (InLongShot()) {
         // The hole is not part of this window, so a pen straddling its edge
         // would be clipped away: fill four strips just outside it instead.
@@ -321,10 +869,6 @@ void COverlayWnd::DrawSelectionFrame(Gdiplus::Graphics& g) {
     Gdiplus::Pen pen(kFrame, 2.0f);
     g.DrawRectangle(&pen, (Gdiplus::REAL)s.left, (Gdiplus::REAL)s.top,
                     (Gdiplus::REAL)w, (Gdiplus::REAL)h);
-
-    int hs = Dpi::S(GetSafeHwnd(), 7);
-    if ((hs & 1) == 0) ++hs;
-    const int off = hs / 2;  // odd size + integer offset centres the square
 
     POINT pts[8] = {
         { s.left, s.top },
@@ -349,18 +893,25 @@ void COverlayWnd::DrawSizeLabel(Gdiplus::Graphics& g) {
     if (!m_session->LongShotSizeText(text))
         text.Format(L"%d x %d", sel.Width(), sel.Height());
 
-    Gdiplus::FontFamily family(kFontFace);
-    Gdiplus::REAL px = (Gdiplus::REAL)(-Dpi::FontHeightForPoint(GetSafeHwnd(), 9));
-    Gdiplus::Font font(&family, px, Gdiplus::FontStyleRegular, Gdiplus::UnitPixel);
+    if (!m_labelFont)
+        m_labelFont = UiFont((int)(-Dpi::FontHeightForPoint(GetSafeHwnd(), 9)));
+    if (!m_labelFont) return;
     g.SetTextRenderingHint(Gdiplus::TextRenderingHintAntiAliasGridFit);
 
-    Gdiplus::RectF measured;
-    g.MeasureString(text.GetString(), text.GetLength(), &font,
-                    Gdiplus::PointF(0, 0), &measured);
+    // The digits change with every pixel of a drag and measuring them is the
+    // expensive half of this card, so it is keyed on the text.
+    if (text != m_labelText) {
+        Gdiplus::RectF measured;
+        g.MeasureString(text.GetString(), text.GetLength(), m_labelFont.get(),
+                        Gdiplus::PointF(0, 0), &measured);
+        m_labelText = text;
+        m_labelSize = CSize((int)std::ceil(measured.Width),
+                            (int)std::ceil(measured.Height));
+    }
 
     Gdiplus::REAL pad = (Gdiplus::REAL)Dpi::S(GetSafeHwnd(), 4);
-    Gdiplus::REAL bw = measured.Width + pad * 2;
-    Gdiplus::REAL bh = measured.Height + pad;
+    Gdiplus::REAL bw = (Gdiplus::REAL)m_labelSize.cx + pad * 2;
+    Gdiplus::REAL bh = (Gdiplus::REAL)m_labelSize.cy + pad;
     Gdiplus::REAL bx = (Gdiplus::REAL)sel.Rect().left;
     Gdiplus::REAL by = (Gdiplus::REAL)sel.Rect().top - bh - 2;
 
@@ -368,10 +919,21 @@ void COverlayWnd::DrawSizeLabel(Gdiplus::Graphics& g) {
     GetClientRect(&cl);
     if (by < cl.top) by = (Gdiplus::REAL)sel.Rect().top + 2;
 
+    // The card is a small fixed rect, and the caret beside it only exists in
+    // 长截图, so the clip grows only when one is actually drawn.
+    Gdiplus::REAL cw = bw, ch = bh, ct = by;
+    if (InLongShot()) {
+        const int m = Dpi::S(GetSafeHwnd(), 12);
+        cw += (Gdiplus::REAL)m * 2;
+        ch += (Gdiplus::REAL)m * 2;
+        ct -= (Gdiplus::REAL)m;
+    }
+    ClipTo card(g, Gdiplus::RectF(bx, ct, cw, ch), &m_chromeInk);
+
     Gdiplus::SolidBrush back(kLabelBack);
     g.FillRectangle(&back, bx, by, bw, bh);
     Gdiplus::SolidBrush fg(kLabelText);
-    g.DrawString(text.GetString(), text.GetLength(), &font,
+    g.DrawString(text.GetString(), text.GetLength(), m_labelFont.get(),
                  Gdiplus::PointF(bx + pad, by + pad / 2), &fg);
 
     if (InLongShot())
@@ -405,15 +967,20 @@ void COverlayWnd::DrawLongShotCaret(Gdiplus::Graphics& g, const CRect& card) {
 
 void COverlayWnd::DrawTip(Gdiplus::Graphics& g) {
     const CaptureSession::TipCard* tip = m_session->Tip();
-    if (!tip) return;
+    if (!tip) {
+        m_tipRect.SetRectEmpty();
+        return;
+    }
 
-    Gdiplus::FontFamily family(kFontFace);
-    Gdiplus::Font font(&family, (Gdiplus::REAL)Dpi::S(GetSafeHwnd(), 12),
-                       Gdiplus::FontStyleRegular, Gdiplus::UnitPixel);
+    if (!m_tipFont) m_tipFont = UiFont(Dpi::S(GetSafeHwnd(), 12));
+    if (!m_tipFont) {
+        m_tipRect.SetRectEmpty();
+        return;
+    }
     g.SetTextRenderingHint(Gdiplus::TextRenderingHintAntiAliasGridFit);
 
     Gdiplus::RectF m;
-    g.MeasureString(tip->text.GetString(), tip->text.GetLength(), &font,
+    g.MeasureString(tip->text.GetString(), tip->text.GetLength(), m_tipFont.get(),
                     Gdiplus::PointF(0, 0), &m);
 
     const Gdiplus::REAL padX = (Gdiplus::REAL)Dpi::S(GetSafeHwnd(), 5);
@@ -433,6 +1000,11 @@ void COverlayWnd::DrawTip(Gdiplus::Graphics& g) {
     // 工具栏-矩形-提示.png shows a borderless white card with a soft shadow
     // falling down and to the right.
     const Gdiplus::REAL so = (Gdiplus::REAL)Dpi::S(GetSafeHwnd(), 2);
+    const Gdiplus::RectF card(bx, by, bw + so, bh + so);
+    m_tipRect = CRect((int)std::floor(card.X), (int)std::floor(card.Y),
+                      (int)std::ceil(card.X + card.Width),
+                      (int)std::ceil(card.Y + card.Height));
+    ClipTo clip(g, card, &m_chromeInk);
     Gdiplus::SolidBrush sh1(0x22000000);
     g.FillRectangle(&sh1, bx + so / 2, by + so / 2, bw, bh);
     Gdiplus::SolidBrush sh2(0x33000000);
@@ -441,7 +1013,7 @@ void COverlayWnd::DrawTip(Gdiplus::Graphics& g) {
     Gdiplus::SolidBrush back(kTipBack);
     g.FillRectangle(&back, bx, by, bw, bh);
     Gdiplus::SolidBrush fg(kTipText);
-    g.DrawString(tip->text.GetString(), tip->text.GetLength(), &font,
+    g.DrawString(tip->text.GetString(), tip->text.GetLength(), m_tipFont.get(),
                  Gdiplus::PointF(bx + padX, by + padY), &fg);
 }
 
@@ -487,12 +1059,6 @@ bool COverlayWnd::ResolvePopup(CPoint pt) {
         m_session->EndTextEdit(true);
         return true;
     }
-    if (m_session->ActiveTool() == tb::Id::Text) {
-        // Clicking an existing label re-edits it in place rather than stacking a
-        // second one on top.
-        m_session->BeginTextEdit(pt, TextAt(pt));
-        return true;
-    }
     return false;
 }
 
@@ -516,17 +1082,7 @@ void COverlayWnd::OnLButtonDown(UINT, CPoint pt) {
     m_anno = nullptr;
     m_annoBefore.reset();
     m_annoIdx = m_annoHandle = -1;
-
-    const tb::Id tool = m_session->ActiveTool();
-    m_pending = annot::MakeShape(
-        tool, Gdiplus::PointF((Gdiplus::REAL)pt.x, (Gdiplus::REAL)pt.y),
-        m_session->Style(), m_session->NextBadgeNumber(), &m_session->Mosaic());
-    if (m_pending) {
-        m_mode = Mode::Drawing;
-        m_session->Select(-1);
-        Invalidate();
-        return;
-    }
+    m_pending.reset();
 
     SelHandle h = sel.HitTest(POINT{ pt.x, pt.y }, HandleRadius());
     if (h != SelHandle::None) {
@@ -540,22 +1096,49 @@ void COverlayWnd::OnLButtonDown(UINT, CPoint pt) {
             m_annoIdx = m_session->SelectedIndex();
             m_annoHandle = hi;
             m_annoBefore = a->Clone();
+            DropFromBase(*a);
         }
     }
 
     if (m_mode == Mode::Idle) {
-        if (annot::Annotation* a =
-                m_session->Annos().TopAt(Gdiplus::PointF((Gdiplus::REAL)pt.x,
-                                                         (Gdiplus::REAL)pt.y))) {
+        // 矩形-点击已画矩形.png, 椭圆-点击已画椭圆可调整大小位置.png and
+        // 箭头-点击已画箭头可调整方向 位置 长短.png all show the tool still armed
+        // with the shape drawn earlier selected and adjustable, so a press that
+        // lands on existing ink grabs it rather than starting another shape.
+        // 画笔 and 马赛克 are the exception: there a press is the first point of
+        // a stroke, and a stroke that begins on old ink must not drag it along.
+        const tb::Id tool = m_session->ActiveTool();
+        const bool freehand = tool == tb::Id::Pen || tool == tb::Id::Mosaic;
+        annot::Annotation* a = freehand
+                                   ? nullptr
+                                   : m_session->Annos().TopAt(
+                                         Gdiplus::PointF((Gdiplus::REAL)pt.x,
+                                                         (Gdiplus::REAL)pt.y));
+        if (a) {
             m_mode = Mode::MoveAnno;
             m_anno = a;
             m_annoIdx = m_session->Annos().IndexOf(a);
             m_annoBefore = a->Clone();
             m_session->Select(m_annoIdx);
+            DropFromBase(*a);
+        } else if (tool == tb::Id::Text) {
+            // A press on bare canvas with the text tool arms a new label; one on
+            // existing ink was handled above, so a label can always be picked up
+            // again. Re-editing stays on the double click, as in 文字-双击编辑.png.
+            m_session->BeginTextEdit(pt, nullptr);
+            m_session->Select(-1);
+        } else if ((m_pending = annot::MakeShape(
+                        tool, Gdiplus::PointF((Gdiplus::REAL)pt.x,
+                                              (Gdiplus::REAL)pt.y),
+                        m_session->Style(), m_session->NextBadgeNumber(),
+                        &m_session->Mosaic()))) {
+            m_mode = Mode::Drawing;
+            m_session->Select(-1);
         } else if (!sel.IsDefault() && sel.Contains(POINT{ pt.x, pt.y })) {
             m_mode = Mode::Moving;
         } else {
             m_mode = Mode::Creating;
+            m_selPicked = true;
             sel.BeginCreate(POINT{ pt.x, pt.y });
             m_session->Select(-1);
         }
@@ -591,54 +1174,68 @@ LRESULT COverlayWnd::OnEditDone(WPARAM wParam, LPARAM) {
 }
 
 void COverlayWnd::OnMouseMove(UINT, CPoint pt) {
+    if (ProbeOn()) g_probeLastMove = ProbeTicks();
     if (InLongShot()) return;
     SelectionModel& sel = m_session->Sel();
     switch (m_mode) {
-    case Mode::Creating:
+    case Mode::Creating: {
+        const RECT before = sel.Rect();
         sel.UpdateCreate(POINT{ pt.x, pt.y });
         LayoutChrome();
-        Invalidate();
+        InvalidateSelChange(before);
         break;
+    }
     case Mode::Moving: {
+        const RECT before = sel.Rect();
         RECT r = m_startRect;
         int dx = pt.x - m_dragStart.x;
         int dy = pt.y - m_dragStart.y;
         r.left += dx; r.top += dy; r.right += dx; r.bottom += dy;
         sel.MoveTo(r);
         LayoutChrome();
-        Invalidate();
+        InvalidateSelChange(before);
         break;
     }
-    case Mode::Sizing:
+    case Mode::Sizing: {
+        const RECT before = sel.Rect();
         sel.Resize(m_handle, POINT{ pt.x, pt.y });
         LayoutChrome();
-        Invalidate();
+        InvalidateSelChange(before);
         break;
+    }
     case Mode::Drawing:
-        if (m_pending)
+        if (m_pending) {
+            const CRect before = AnnoRect(m_pending.get());
             m_pending->UpdateDrag(
                 Gdiplus::PointF((Gdiplus::REAL)pt.x, (Gdiplus::REAL)pt.y),
                 (::GetKeyState(VK_SHIFT) & 0x8000) != 0);
-        Invalidate();
+            InvalidateAnnoChange(m_pending.get(), before);
+        }
         break;
     case Mode::MoveAnno:
         if (m_anno) {
+            const CRect before = AnnoRect(m_anno);
             m_anno->Translate((Gdiplus::REAL)(pt.x - m_dragStart.x),
                               (Gdiplus::REAL)(pt.y - m_dragStart.y));
             m_dragStart = pt;  // the next delta is relative to this move
+            InvalidateAnnoChange(m_anno, before);
         }
-        Invalidate();
         break;
     case Mode::DragHandle:
-        if (m_anno)
+        if (m_anno) {
+            const CRect before = AnnoRect(m_anno);
             m_anno->MoveHandle(m_annoHandle,
                                Gdiplus::PointF((Gdiplus::REAL)pt.x, (Gdiplus::REAL)pt.y));
-        Invalidate();
+            InvalidateAnnoChange(m_anno, before);
+        }
         break;
     case Mode::Idle:
         CursorMoved();
         break;
     }
+    // The magnifier rides the cursor through a selection drag, so its card is
+    // part of that band too; it is absent during a stroke, where this is free.
+    if (m_mode != Mode::Idle) InvalidateLoupe();
 }
 
 void COverlayWnd::OnLButtonUp(UINT, CPoint) {
@@ -656,11 +1253,18 @@ void COverlayWnd::OnLButtonUp(UINT, CPoint) {
             m_pending.reset();
         }
     } else if (m_mode == Mode::MoveAnno || m_mode == Mode::DragHandle) {
-        if (m_anno && m_annoBefore && !SameBox(m_annoBefore->BBox(), m_anno->BBox()))
-            m_session->RecordMove(m_annoIdx, std::move(m_annoBefore));
+        const bool moved =
+            m_anno && m_annoBefore && !SameBox(m_annoBefore->BBox(), m_anno->BBox());
+        const CRect was = m_anno ? AnnoRect(m_anno) : CRect(0, 0, 0, 0);
+        if (moved) m_session->RecordMove(m_annoIdx, std::move(m_annoBefore));
         m_annoBefore.reset();
         m_anno = nullptr;
         m_annoIdx = m_annoHandle = -1;
+        // RecordMove rebuilds the cache with the shape back in it. A drag that
+        // went nowhere records nothing, so the shape has to be put back here or
+        // it would vanish along with the button.
+        m_mode = Mode::Idle;  // MovingAnno() has to be null for the rebuild
+        if (!moved && !was.IsRectEmpty()) TouchBaseIn(was);
     }
     m_mode = Mode::Idle;
     m_handle = SelHandle::None;
@@ -724,7 +1328,10 @@ BOOL COverlayWnd::OnSetCursor(CWnd*, UINT, UINT) {
             const int hi = HitAnnoHandle(*a, pt);
             if (hi >= 0) id = kBoxCursors[hi];
         }
-        if (id == IDC_CROSS &&
+        // The 画笔 and 马赛克 press is a stroke even on top of old ink, so the
+        // grab cursor would promise a move that does not happen.
+        const tb::Id tool = m_session->ActiveTool();
+        if (id == IDC_CROSS && tool != tb::Id::Pen && tool != tb::Id::Mosaic &&
             m_session->Annos().TopAt(Gdiplus::PointF((Gdiplus::REAL)pt.x,
                                                      (Gdiplus::REAL)pt.y)))
             id = IDC_SIZEALL;

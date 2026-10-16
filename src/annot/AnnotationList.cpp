@@ -49,8 +49,9 @@ Annotation* AnnotationList::TopAt(Gdiplus::PointF pt) const {
     return nullptr;
 }
 
-void AnnotationList::DrawAll(Gdiplus::Graphics& g) const {
-    for (const auto& a : m_items) a->Draw(g);
+void AnnotationList::DrawAll(Gdiplus::Graphics& g, const Annotation* skip) const {
+    for (const auto& a : m_items)
+        if (a.get() != skip) a->Draw(g);
 }
 
 void DrawSelection(Gdiplus::Graphics& g, const Annotation& a, Gdiplus::REAL r) {

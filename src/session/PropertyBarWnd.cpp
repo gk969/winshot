@@ -418,6 +418,9 @@ void CPropertyBarWnd::OnLButtonDown(UINT, CPoint pt) {
         tb::Style& st = m_session->Style();
         if (t.kind == Kind::Dot) st.widthIndex = t.index;
         else st.colorIndex = t.index;
+        // A shape already on the canvas and selected takes the pick with it;
+        // with nothing selected this only sets what the next shape is drawn with.
+        m_session->ApplyStyleToSelected();
         m_session->HideFontDropdown();
         Refresh();
         return;

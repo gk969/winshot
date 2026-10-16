@@ -133,8 +133,6 @@ Start-Sleep -Milliseconds 900
 $h = Grab 'D:\Project\winshot\obj\s3_hover.png'
 $hp = $h.GetPixel($firstX, $tbTop + 3)
 "hover cell pixel = #{0:X2}{1:X2}{2:X2}  (plain chrome = EBEFF3, hot ~ D3D6DA)" -f $hp.R, $hp.G, $hp.B
-& powershell -NoProfile -File 'D:\Project\winshot\tools\enum_children.ps1' | Select-String 'Toolbar'
-
 "`nclicking first slot at ($firstX,$midY) cell=$cell"
 Click $firstX $midY
 

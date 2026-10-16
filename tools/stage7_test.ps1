@@ -132,6 +132,27 @@ function Toolbar($overlay) {
     if ($bars.Count -eq 0) { return $null }
     return @($bars | Sort-Object { ($_.right - $_.left) } -Descending)[0]
 }
+# White paper and black glyph ink, counted on a grid. The sample window the test
+# owns is exactly that, so these three numbers say whether a rect holds that
+# window's content at full brightness: dimming it by the overlay's 0.4 would drop
+# the brightest pixel from 255 to 102, and a wrong crop loses the ink.
+function Paper($bmp, [int]$l, [int]$t, [int]$r, [int]$b) {
+    $white = 0; $ink = 0; $n = 0; $brightest = 0
+    for ($y = $t + 4; $y -lt $b - 4; $y += 5) {
+        for ($x = $l + 4; $x -lt $r - 4; $x += 5) {
+            $c = $bmp.GetPixel($x, $y)
+            $lum = ($c.R + $c.G + $c.B) / 3
+            $n++
+            if ($lum -gt $brightest) { $brightest = [int]$lum }
+            if ($c.R -gt 240 -and $c.G -gt 240 -and $c.B -gt 240) { $white++ }
+            if ($c.R -lt 60 -and $c.G -lt 60 -and $c.B -lt 60) { $ink++ }
+        }
+    }
+    if ($n -eq 0) { return @{ white = 0.0; ink = 0.0; bright = 0 } }
+    return @{ white = [Math]::Round(100.0 * $white / $n, 1)
+              ink = [Math]::Round(100.0 * $ink / $n, 1)
+              bright = $brightest }
+}
 
 $fail = @()
 
@@ -167,8 +188,6 @@ $sample.Show()
 Start-Sleep -Milliseconds 800
 [System.Windows.Forms.Application]::DoEvents()
 
-$before = Grab 'D:\Project\winshot\obj\s7_before.png'
-
 $proc = Start-Process -FilePath 'D:\Project\winshot\x64\Debug\winshot.exe' -PassThru
 Start-Sleep -Seconds 2
 $sink = @(Find-Win 'WinShotSink')
@@ -180,7 +199,11 @@ Start-Sleep -Seconds 2
 $ov = @(Find-Win 'WinShotOverlay')
 if ($ov.Count -eq 0) { "FAIL: no overlay window"; exit 1 }
 
-$SX0 = 1200; $SY0 = 800; $SX1 = 1800; $SY1 = 1200
+# Pinned over the sample window rather than over bare desktop: its white paper
+# and black glyphs are known in advance and never move, so the pin's pixels can
+# be asserted without racing whatever the rest of the desktop is doing. The
+# selection stays inside the client area, clear of the caption and the border.
+$SX0 = $FX + 100; $SY0 = $FY + 120; $SX1 = $FX + $FW - 100; $SY1 = $FY + $FH - 80
 Drag $SX0 $SY0 $SX1 $SY1
 $bar = Toolbar $ov[0]
 if (-not $bar) { "FAIL: no toolbar after the drag"; exit 1 }
@@ -203,22 +226,62 @@ if ($pr.left -ne $SX0 -or $pr.top -ne $SY0 -or $pr.right -ne $SX1 -or $pr.bottom
 }
 if (@(Find-Win 'WinShotOverlay').Count -gt 0) { $fail += 'overlay still open after pinning' }
 
-# The pin shows the frozen still, so its pixels have to match the desktop as it
-# looked before the hotkey. The 1px edge pen is skipped.
 $after = Grab 'D:\Project\winshot\obj\s7_pin.png'
-$diff = 0; $worst = 0
-foreach ($p in @( @(0.25, 0.25), @(0.75, 0.25), @(0.5, 0.5), @(0.25, 0.75), @(0.75, 0.75) )) {
-    $x = [int]($pr.left + ($pr.right - $pr.left) * $p[0])
-    $y = [int]($pr.top + ($pr.bottom - $pr.top) * $p[1])
-    $a = $before.GetPixel($x, $y); $b = $after.GetPixel($x, $y)
-    $d = [Math]::Abs($a.R - $b.R) + [Math]::Abs($a.G - $b.G) + [Math]::Abs($a.B - $b.B)
-    if ($d -gt $worst) { $worst = $d }
-    if ($d -gt 24) { $diff++ }
+$pp = Paper $after $pr.left $pr.top $pr.right $pr.bottom
+"pin at the selection: $($pp.white)% white, $($pp.ink)% ink, brightest=$($pp.bright)"
+if ($pp.bright -lt 200) { $fail += 'the pin is dimmed — the still should be at full brightness' }
+if ($pp.white -lt 20) { $fail += "pin is not the sample crop ($($pp.white)% white)" }
+if ($pp.ink -lt 1) { $fail += "pin is not the sample crop ($($pp.ink)% ink)" }
+
+# The still, in the sense the feature is about: the pin's own pixels do not move
+# while the desktop around them does. A match against a grab from seconds earlier
+# cannot show that on an animating desktop — the reference itself moved.
+Start-Sleep -Milliseconds 1200
+$again = Grab 'D:\Project\winshot\obj\s7_pin2.png'
+$moved = 0; $m = 0
+for ($y = $pr.top + 4; $y -lt $pr.bottom - 4; $y += 5) {
+    for ($x = $pr.left + 4; $x -lt $pr.right - 4; $x += 5) {
+        $c1 = $after.GetPixel($x, $y); $c2 = $again.GetPixel($x, $y)
+        $m++
+        if ([Math]::Abs($c1.R - $c2.R) -gt 6 -or [Math]::Abs($c1.G - $c2.G) -gt 6 -or
+            [Math]::Abs($c1.B - $c2.B) -gt 6) { $moved++ }
+    }
 }
-"pin pixel mismatches: $diff/5 worst=$worst (want 0)"
-if ($diff -gt 0) { $fail += 'pin image does not match the frozen still' }
-$r = New-Object System.Drawing.Rectangle (($pr.left - 4), ($pr.top - 4), ($pr.right - $pr.left + 8), ($pr.bottom - $pr.top + 8))
+# The rest of the screen over the same interval, so a desktop that happens to be
+# idle cannot make the check above pass by doing nothing.
+$out = 0; $o = 0
+for ($y = 60; $y -lt $again.Height - 60; $y += 13) {
+    for ($x = 60; $x -lt $again.Width - 60; $x += 13) {
+        if ($x -ge $pr.left -and $x -lt $pr.right -and $y -ge $pr.top -and $y -lt $pr.bottom) {
+            continue
+        }
+        $c1 = $after.GetPixel($x, $y); $c2 = $again.GetPixel($x, $y)
+        $o++
+        if ([Math]::Abs($c1.R - $c2.R) -gt 6 -or [Math]::Abs($c1.G - $c2.G) -gt 6 -or
+            [Math]::Abs($c1.B - $c2.B) -gt 6) { $out++ }
+    }
+}
+"pin pixels that moved in 1.2s: $moved of $m (want 0)"
+"the rest of the screen moved: $out of $o"
+if ($moved -gt 0) { $fail += 'the pin is not a still — its pixels changed while the desktop did' }
+$again.Dispose()
+
+# Moving the pin has to carry that content with it: proof the window is above the
+# sample it was cut from and holds its own bitmap rather than showing the live
+# window underneath.
+$pw = $pr.right - $pr.left; $ph = $pr.bottom - $pr.top
+[void][W7]::MoveWindow($pins[0], 200, 200, $pw, $ph, $true)
+Start-Sleep -Milliseconds 600
+$moved2 = Grab 'D:\Project\winshot\obj\s7_pin_moved.png'
+$mp = Paper $moved2 200 200 (200 + $pw) (200 + $ph)
+"pin after moving to 200,200: $($mp.white)% white, $($mp.ink)% ink, brightest=$($mp.bright)"
+if ($mp.white -lt 20 -or $mp.ink -lt 1) {
+    $fail += 'the moved pin no longer shows the pinned crop'
+}
+$moved2.Dispose()
+$r = New-Object System.Drawing.Rectangle (($pr.left - 4), ($pr.top - 4), ($pw + 8), ($ph + 8))
 $c = $after.Clone($r, $after.PixelFormat); $c.Save('D:\Project\winshot\obj\s7_pin_crop.png'); $c.Dispose()
+$after.Dispose()
 
 [void][W7]::SetForegroundWindow($pins[0])
 Start-Sleep -Milliseconds 300

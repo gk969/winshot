@@ -258,7 +258,14 @@ std::unique_ptr<Annotation> ShapeMosaic::Clone() const {
 
 // -------------------------------------------------------------------- arrows
 
-Gdiplus::REAL ShapeArrow::HeadLen() const { return std::max(10.0f, m_pen * 3.0f); }
+namespace {
+// The head has a floor well above the thinnest pen: scaled only from the stroke
+// it is a speck at the end of a long shaft, which is what made the old one read
+// as a line with no head at all.
+Gdiplus::REAL HeadLenFor(Gdiplus::REAL pen) { return std::max(24.0f, pen * 4.0f); }
+}  // namespace
+
+Gdiplus::REAL ShapeArrow::HeadLen() const { return HeadLenFor(m_pen); }
 
 bool ShapeArrow::IsEmpty() const {
     return std::hypot(m_p1.X - m_p0.X, m_p1.Y - m_p0.Y) < 3.0f;
@@ -289,10 +296,10 @@ void HeadTriangle(Gdiplus::PointF p0, Gdiplus::PointF p1, Gdiplus::REAL pen,
                   Gdiplus::PointF& tip, Gdiplus::PointF base[3]) {
     const Gdiplus::REAL dx = p1.X - p0.X, dy = p1.Y - p0.Y;
     const Gdiplus::REAL len = std::hypot(dx, dy);
-    const Gdiplus::REAL hl = std::min(std::max(10.0f, pen * 3.0f), len);
+    const Gdiplus::REAL hl = std::min(HeadLenFor(pen), len);
     const Gdiplus::REAL ux = dx / len, uy = dy / len;
     const Gdiplus::PointF neck(p1.X - ux * hl, p1.Y - uy * hl);
-    const Gdiplus::REAL hw = hl * 0.30f;
+    const Gdiplus::REAL hw = hl * 0.42f;
 
     base[0] = p1;
     base[1] = Gdiplus::PointF(neck.X - uy * hw, neck.Y + ux * hw);

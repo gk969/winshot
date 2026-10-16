@@ -51,6 +51,10 @@ public:
     // For a drag that mutated an annotation in place: `before` is the clone
     // taken when the drag started.
     void RecordMove(int idx, std::unique_ptr<annot::Annotation> before);
+    // The property bar's 粗细 / colour pickers, applied to whatever is selected
+    // now. Not recorded on the undo stack — the pickers are live controls, and
+    // the last one clicked is not something a user expects to step back through.
+    void ApplyStyleToSelected();
     void Undo();
 
     // The 文字 tool's inline editor. It lives here rather than on the overlay so

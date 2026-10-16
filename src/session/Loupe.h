@@ -29,7 +29,10 @@ RECT CardRect(HWND hwnd, CPoint at, const CRect& bounds);
 // the capture starts in cursor space — see out::RenderSelection.
 COLORREF Sampled(const DesktopCapture& cap, CPoint at, POINT off);
 
-void Draw(CaptureSession& session, CPoint at, Gdiplus::Graphics& g, const CRect& bounds);
+// `font` is the readout's face, passed in because the overlay rides the card on
+// every mouse move and building a Gdiplus::Font per frame showed up in the cost.
+void Draw(CaptureSession& session, CPoint at, Gdiplus::Graphics& g,
+          const CRect& bounds, const Gdiplus::Font& font);
 
 // 按c复制色号: the readout's RGB line, onto the clipboard as text.
 bool CopyColor(const DesktopCapture& cap, CPoint at, POINT off);

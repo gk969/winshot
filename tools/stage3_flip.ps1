@@ -20,7 +20,10 @@ public static class W5 {
     [DllImport("user32.dll")] public static extern uint SendInput(uint n, INP[] inputs, int cb);
     [DllImport("user32.dll")] public static extern IntPtr WindowFromPoint(POINT p);
     [DllImport("user32.dll")] public static extern int GetClassName(IntPtr h, StringBuilder s, int n);
-    [StructLayout(LayoutKind.Sequential)] public struct POINT { public int x, y; }
+    [StructLayout(LayoutKind.Sequential)] public struct POINT {
+        public int x, y;
+        public POINT(int x, int y) { this.x = x; this.y = y; }
+    }
     public static void Warp(int x, int y, int vw, int vh) {
         INP[] i = new INP[1];
         i[0].type = 0;
@@ -138,9 +141,13 @@ for ($y = $yLo; $y -le $yHi; $y++) {
     }
 }
 $wfp = [W5]::WindowFromPoint([W5+POINT]::new($hx, $hy))
-$cn = New-Object System.Text.StringBuilder 256
-[void][W5]::GetClassName($wfp, $cn, 256)
-"window under cursor: hwnd=$wfp class=$($cn.ToString())"
+if ($wfp) {
+    $cn = New-Object System.Text.StringBuilder 256
+    [void][W5]::GetClassName($wfp, $cn, 256)
+    "window under cursor: hwnd=$wfp class=$($cn.ToString())"
+} else {
+    "window under cursor: none"
+}
 $hot = $t.GetPixel($hx, $b[0] + 2)
 "cell pixel under cursor = #{0:X2}{1:X2}{2:X2}  (plain chrome = EBEFF3)" -f $hot.R, $hot.G, $hot.B
 if ($l -lt 0) { "FAIL: no white tooltip card near the cursor" }

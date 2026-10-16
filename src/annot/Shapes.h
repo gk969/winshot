@@ -35,6 +35,10 @@ public:
         m_box.X += dx;
         m_box.Y += dy;
     }
+    void SetStyle(Gdiplus::Color ink, Gdiplus::REAL pen) override {
+        m_ink = ink;
+        m_pen = pen;
+    }
 
 protected:
     // Distance from pt to the drawn outline, for the hit test.
@@ -84,6 +88,10 @@ public:
     Gdiplus::PointF HandleAt(int) const override { return Gdiplus::PointF(); }
     void MoveHandle(int, Gdiplus::PointF) override {}
     void Translate(Gdiplus::REAL dx, Gdiplus::REAL dy) override;
+    void SetStyle(Gdiplus::Color ink, Gdiplus::REAL pen) override {
+        m_ink = ink;
+        m_pen = pen;
+    }
 
 protected:
     void Append(Gdiplus::PointF p);
@@ -119,6 +127,9 @@ public:
     Kind GetKind() const override { return Kind::Mosaic; }
     void Draw(Gdiplus::Graphics& g) const override;
     std::unique_ptr<Annotation> Clone() const override;
+    // The band is filled with the blurred content, so only the width of it is
+    // the picker's to change; the inherited ink is a placeholder nothing draws.
+    void SetStyle(Gdiplus::Color, Gdiplus::REAL pen) override { m_pen = pen; }
 
 private:
     MosaicSource* m_src;
@@ -149,6 +160,10 @@ public:
     void UpdateDrag(Gdiplus::PointF to, bool shift) override;
     bool IsEmpty() const override;
     std::unique_ptr<Annotation> Clone() const override;
+    void SetStyle(Gdiplus::Color ink, Gdiplus::REAL pen) override {
+        m_ink = ink;
+        m_pen = pen;
+    }
 
     Gdiplus::REAL HeadLen() const;
 
@@ -178,6 +193,8 @@ public:
     }
     bool IsEmpty() const override { return false; }
     std::unique_ptr<Annotation> Clone() const override;
+    // The disc's size comes from its own radius, not the stroke width.
+    void SetStyle(Gdiplus::Color ink, Gdiplus::REAL) override { m_ink = ink; }
 
     int Number() const { return m_number; }
 
@@ -208,6 +225,8 @@ public:
     }
     bool IsEmpty() const override { return m_text.IsEmpty(); }
     std::unique_ptr<Annotation> Clone() const override;
+    // Size comes from the font, not the stroke width.
+    void SetStyle(Gdiplus::Color ink, Gdiplus::REAL) override { m_ink = ink; }
 
     const CString& Text() const { return m_text; }
     void SetText(const CString& t) { m_text = t; }

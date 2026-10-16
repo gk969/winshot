@@ -12,11 +12,23 @@ public static class W6L {
     [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr h, out RECT r);
     [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr h);
     [DllImport("user32.dll")] public static extern void mouse_event(uint f, uint dx, uint dy, uint d, UIntPtr e);
+    [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
+    [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr h);
+    [DllImport("user32.dll")] public static extern void keybd_event(byte vk, byte scan, uint flags, IntPtr extra);
     [StructLayout(LayoutKind.Sequential)] public struct RECT { public int left, top, right, bottom; }
 }
 "@
 
 $LEFTDOWN = 0x0002; $LEFTUP = 0x0004
+
+# Windows refuses SetForegroundWindow from a process that is not already in the
+# foreground, and the overlay only takes keys while it has focus. Pressing a key
+# lifts that lock — the same thing a real click does.
+function Force-Foreground([IntPtr]$h) {
+    [void][W6L]::keybd_event(0x12, 0, 0, [IntPtr]::Zero)        # VK_MENU down
+    [void][W6L]::keybd_event(0x12, 0, 2, [IntPtr]::Zero)        # VK_MENU up
+    [void][W6L]::SetForegroundWindow($h)
+}
 
 # 96dpi display: the app's logical sizes are its physical sizes.
 $BOXW = 117; $BOXH = 85; $INFOH = 62; $SCALE = 5
@@ -117,9 +129,29 @@ Get-ChildItem 'D:\Project\winshot\obj\s6_*.png' -ErrorAction SilentlyContinue | 
 $fail = @()
 
 # The loupe magnifies the frozen still, so the reference for every colour check
-# is the desktop as it looks one moment before the hotkey.
+# is the desktop as it looks one moment before the hotkey. That reference only
+# holds while the desktop itself is not moving: on a playing video the still and
+# the grab taken seconds earlier differ, so the two checks that read $before
+# pixel-for-pixel (the magnified field and the copied colour) go advisory and the
+# checks that read pixels we drew stay hard.
 MoveTo 3000 1900
 Start-Sleep -Milliseconds 400
+$g1 = Grab 'D:\Project\winshot\obj\s6_pre1.png'
+Start-Sleep -Seconds 1
+$g2 = Grab 'D:\Project\winshot\obj\s6_pre2.png'
+$changed = 0; $sampled = 0
+for ($py = 0; $py -lt $g1.Height; $py += 11) {
+    for ($px = 0; $px -lt $g1.Width; $px += 11) {
+        $c1 = $g1.GetPixel($px, $py); $c2 = $g2.GetPixel($px, $py)
+        $sampled++
+        if ([Math]::Abs($c1.R - $c2.R) -gt 3 -or [Math]::Abs($c1.G - $c2.G) -gt 3 -or
+            [Math]::Abs($c1.B - $c2.B) -gt 3) { $changed++ }
+    }
+}
+$g1.Dispose(); $g2.Dispose()
+$staticDesk = ($changed -eq 0)
+"desktop stability: $changed of $sampled sampled pixels changed in 1s -> " +
+    $(if ($staticDesk) { 'still matches the pre-summon grab' } else { 'still-based checks are advisory'})
 $before = Grab 'D:\Project\winshot\obj\s6_before.png'
 
 $proc = Start-Process -FilePath 'D:\Project\winshot\x64\Debug\winshot.exe' -PassThru
@@ -204,7 +236,7 @@ for ($yy = 0; $yy -lt $SCALE; $yy++) {
 }
 $mean = [int]($sum / ($SCALE * $SCALE))
 "field block at ${bx},${by} mean diff=$mean spread=$spread (want <20 / <8)"
-if ($mean -ge 20) { $fail += 'field does not show the still under the cursor' }
+if ($mean -ge 20 -and $staticDesk) { $fail += 'field does not show the still under the cursor' }
 if ($spread -ge 8) { $fail += 'field block not upscaled uniformly' }
 
 $cross = CrossCount $s1 $fx $fy ($fx + $fw - 1) ($fy + $fh - 1)
@@ -241,7 +273,13 @@ if ($ink -lt 150) { $fail += 'readout has no text' }
 [void](Crop $before ($X - 40) ($Y - 40) 80 80 'D:\Project\winshot\obj\s6_source.png')
 
 # --- 按c复制色号 ------------------------------------------------------------
+# The key only reaches the overlay while it is the foreground window, and the
+# sentinel rules out a leftover clipboard from whichever test ran last.
 $want = 'RGB:({0},{1},{2})' -f $src.R, $src.G, $src.B
+[System.Windows.Forms.Clipboard]::SetText('sentinel')
+Force-Foreground $ov[0]
+Start-Sleep -Milliseconds 300
+"foreground is overlay: $([W6L]::GetForegroundWindow() -eq $ov[0])"
 $got = ''
 for ($try = 0; $try -lt 3; $try++) {
     [void][System.Windows.Forms.SendKeys]::SendWait('c')
@@ -250,7 +288,11 @@ for ($try = 0; $try -lt 3; $try++) {
     if ($got -eq $want) { break }
 }
 "clipboard: '$got' (want '$want')"
-if ($got -ne $want) { $fail += "c did not copy the sampled colour (got '$got')" }
+if ($got -notmatch '^RGB:\(\d{1,3},\d{1,3},\d{1,3}\)$') {
+    $fail += "c did not copy a colour (got '$got')"
+} elseif ($got -ne $want -and $staticDesk) {
+    $fail += "c copied the wrong colour (got '$got', want '$want')"
+}
 
 # --- the magnifier gets out of the way -------------------------------------
 $bars = @(VisibleBars $ov[0])

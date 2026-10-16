@@ -17,10 +17,16 @@ BOOL CTrayIcon::Install(HWND owner, UINT callbackMessage) {
     m_nid.hIcon = m_icon;
     lstrcpynW(m_nid.szTip, L"WinShot  (Ctrl+Shift+A)", _countof(m_nid.szTip));
 
-    m_nid.uVersion = NOTIFYICON_VERSION_4;
-    Shell_NotifyIconW(NIM_SETVERSION, &m_nid);
-
+    // uVersion has to be carried in the struct: NIM_SETVERSION reads it from
+    // there, so leaving it zero asks the shell for version 0 back and the icon
+    // keeps reporting mouse messages in the old layout. It also only takes
+    // effect on an icon that already exists, so it has to follow NIM_ADD.
     m_installed = !!Shell_NotifyIconW(NIM_ADD, &m_nid);
+    if (m_installed) {
+        m_nid.uFlags = NIF_MESSAGE;
+        m_nid.uVersion = NOTIFYICON_VERSION_4;
+        Shell_NotifyIconW(NIM_SETVERSION, &m_nid);
+    }
     if (!m_installed) {
         DestroyIcon(m_icon);
         m_icon = nullptr;

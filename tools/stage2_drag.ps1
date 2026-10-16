@@ -74,16 +74,21 @@ function Seed([int]$x, [int]$y) {
     $script:dimPx[$key] = @([int]($c[0]*0.4), [int]($c[1]*0.4), [int]($c[2]*0.4))
 }
 
+# The absolute probes compare against a desktop grab taken before winshot starts,
+# so they only mean anything while the desktop itself is not changing. On a live
+# desktop — a playing video, a clock, a window the user moved — they are advisory
+# and only the frame probes, which read pixels we drew, stay hard assertions.
 function Probe([string]$tag, $pack, [int]$x, [int]$y, [bool]$inside) {
     Seed $x $y
     $key = "$x,$y"
     $p = Px $pack $x $y
     $ref = if ($inside) { $script:basePx[$key] } else { $script:dimPx[$key] }
     $ok = Near $p $ref 12
-    if (-not $ok) { $script:failures++ }
+    if (-not $ok -and $script:staticDesk) { $script:failures++ }
     "{0,-24} ({1},{2}) {3} got={4},{5},{6} want={7},{8},{9} {10}" -f `
         $tag, $x, $y, $(if ($inside) {'inside '} else {'outside'}), `
-        $p[0],$p[1],$p[2], $ref[0],$ref[1],$ref[2], $(if ($ok) {'OK'} else {'FAIL'})
+        $p[0],$p[1],$p[2], $ref[0],$ref[1],$ref[2], `
+        $(if ($ok) {'OK'} elseif ($script:staticDesk) {'FAIL'} else {'warn'})
 }
 
 # The dimmed band ends at edge-1 and the still starts at edge, so a 2px frame
@@ -120,6 +125,27 @@ Start-Sleep -Milliseconds 500
 
 MoveTo 3000 1900
 Start-Sleep -Milliseconds 400
+
+$t1 = Grab 'D:\Project\winshot\obj\d_pre1.png'
+Start-Sleep -Seconds 1
+$t2 = Grab 'D:\Project\winshot\obj\d_pre2.png'
+$u1 = Pixels $t1; $u2 = Pixels $t2
+$changed = 0; $sampled = 0
+for ($y = 0; $y -lt $t1.Height; $y += 11) {
+    $o1 = $y * $u1[1]; $o2 = $y * $u2[1]
+    for ($x = 0; $x -lt $t1.Width; $x += 11) {
+        $i1 = $o1 + $x * 4; $i2 = $o2 + $x * 4
+        $sampled++
+        if ($u1[0][$i1] -ne $u2[0][$i2] -or $u1[0][$i1+1] -ne $u2[0][$i2+1] -or
+            $u1[0][$i1+2] -ne $u2[0][$i2+2]) { $changed++ }
+    }
+}
+$t1.Dispose(); $t2.Dispose()
+$script:staticDesk = ($changed -eq 0)
+"desktop stability: $changed of $sampled sampled pixels changed in 1s -> " +
+    $(if ($script:staticDesk) { 'pixel probes are hard assertions' }
+      else { 'pixel probes are advisory'})
+
 $base = Grab 'D:\Project\winshot\obj\d_base.png'
 $bp = Pixels $base
 
@@ -216,10 +242,15 @@ function FindFrameH([int]$x, [int]$from, [int]$to) {
 }
 
 $l = FindFrameV 1100 1340 1520
-$top = FindFrameH ($l + 100) 990 1170
-$r = FindFrameV 1100 ($l + 860) ($l + 960)
-$bot = FindFrameH ($l + 100) ($top + 560) ($top + 660)
+$top = if ($l -gt 0) { FindFrameH ($l + 100) 990 1170 } else { -1 }
+$r = if ($l -gt 0) { FindFrameV 1100 ($l + 860) ($l + 960) } else { -1 }
+$bot = if ($l -gt 0 -and $top -gt 0) { FindFrameH ($l + 100) ($top + 560) ($top + 660) } else { -1 }
 $wOk = ($r - $l -eq 900); $hOk = ($bot - $top -eq 600); $moved = ($l -gt 1300 -and $top -gt 1000)
+if ($l -lt 0) {
+    # SendKeys also drops keystrokes, so the offsets vary between runs; a frame
+    # that is missing altogether means the overlay was not what the grab saw.
+    "nudge: no selection frame in the grab — the overlay was not on screen"
+}
 if (-not ($wOk -and $hOk -and $moved)) { $script:failures++ }
 "nudge: left=$l top=$top right=$r bottom=$bot  w=$($r-$l) (want 900) $wOk  h=$($bot-$top) (want 600) $hOk  moved=$moved"
 $s4.Dispose()

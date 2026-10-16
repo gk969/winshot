@@ -54,8 +54,11 @@ $shot = Grab 'D:\Project\winshot\obj\overlay.png'
 $w = $base.Width; $h = $base.Height
 "image ${w}x${h}"
 
-# The default selection is the whole screen, so every pixel except the frame,
-# the handles, the size label and the cursor should be identical to the desktop.
+# Summoning dims the whole screen — the default selection is the full screen and
+# the dim covers it too, so the desktop goes dark the moment the hotkey lands.
+# Every sampled pixel should therefore be base * (1 - 153/255) = base * 0.4,
+# except the frame, the handles, the size label, the magnifier card and whatever
+# the desktop itself did in the two seconds between the grabs.
 function Pixels($bmp) {
     $rect = New-Object System.Drawing.Rectangle 0, 0, $bmp.Width, $bmp.Height
     $data = $bmp.LockBits($rect, [System.Drawing.Imaging.ImageLockMode]::ReadOnly,
@@ -71,23 +74,43 @@ $bb = Pixels $shot
 $bytesA = $ba[0]; $strideA = $ba[1]
 $bytesB = $bb[0]; $strideB = $bb[1]
 
-$diff = 0; $first = $null
+# The magnifier card shows the un-dimmed still, so it is excluded rather than
+# treated as a mismatch. Per-pixel equality against a grab taken two seconds
+# earlier is not a usable assertion on a desktop that is animating — a playing
+# video moves a quarter of the pixels — so the hard check is the mean: dimming
+# every pixel by the same factor scales the mean by that factor no matter what
+# individual pixels did.
+$cardL = 2942; $cardR = 3059; $cardT = 1458; $cardB = 1604
+$off = 0; $n = 0; $first = $null
+$sumA = [double]0; $sumB = [double]0
 for ($y = 6; $y -lt $h - 6; $y += 3) {
     $oa = $y * $strideA; $ob = $y * $strideB
     for ($x = 6; $x -lt $w - 6; $x += 3) {
+        if ($x -ge $cardL -and $x -le $cardR -and $y -ge $cardT -and $y -le $cardB) {
+            continue
+        }
         $ia = $oa + $x * 4; $ib = $ob + $x * 4
-        if ([Math]::Abs($bytesA[$ia] - $bytesB[$ib]) -gt 2 -or
-            [Math]::Abs($bytesA[$ia+1] - $bytesB[$ib+1]) -gt 2 -or
-            [Math]::Abs($bytesA[$ia+2] - $bytesB[$ib+2]) -gt 2) {
-            $diff++
+        $n++
+        $bad = $false
+        for ($c = 0; $c -lt 3; $c++) {
+            $av = [int]$bytesA[$ia + $c]; $bv = [int]$bytesB[$ib + $c]
+            $sumA += $av; $sumB += $bv
+            if ([Math]::Abs([Math]::Round($av * 0.4) - $bv) -gt 4) { $bad = $true }
+        }
+        if ($bad) {
+            $off++
             if (-not $first) {
                 $first = "($x,$y) base=$($bytesA[$ia+2]),$($bytesA[$ia+1]),$($bytesA[$ia]) shot=$($bytesB[$ib+2]),$($bytesB[$ib+1]),$($bytesB[$ib])"
             }
         }
     }
 }
-"sampling diff pixels = $diff"
-if ($first) { "first diff: $first" }
+$ratio = if ($sumA -gt 0) { [Math]::Round($sumB / $sumA, 3) } else { 0 }
+$pct = if ($n) { [Math]::Round(100.0 * $off / $n, 2) } else { 0 }
+"mean brightness ratio = $ratio (want 0.4)"
+"off the 0.4x dim model: $off of $n sampled pixels ($pct%)"
+if ($first) { "first off-model: $first" }
+"dim at summon: $(if ($ratio -ge 0.36 -and $ratio -le 0.44) {'OK'} else {'FAIL'})"
 
 function CountWindows([string]$title) {
     $list = New-Object System.Collections.ArrayList
