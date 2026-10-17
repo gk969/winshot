@@ -15,6 +15,10 @@ public:
     virtual void Draw(Gdiplus::Graphics& g) const = 0;
 
     virtual Gdiplus::RectF BBox() const = 0;
+    // What the drawing covers once the ink is down. BBox() is the geometry the
+    // handles sit on, which for an outline is its centre line; this is the box
+    // that has to stay inside the 选区.
+    virtual Gdiplus::RectF InkBBox() const { return BBox(); }
     virtual bool HitTest(Gdiplus::PointF pt) const = 0;
 
     // Selection chrome. Handles are indexed 0..HandleCount()-1 in the same

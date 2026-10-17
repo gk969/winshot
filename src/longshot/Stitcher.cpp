@@ -42,22 +42,26 @@ int Tolerance(int tailRows) {
     return t < 4 ? 4 : t;
 }
 
-Shift FindShift(const std::vector<uint64_t>& tail, const std::vector<uint64_t>& frame,
-                int maxStep) {
+namespace {
+
+// `ref` is the B rows already accumulated at one end of the document, `frame`
+// the whole current frame. For a shift of d rows, ref row 0 sits at frame row
+// h-B-d (the tail, scrolled down) or at d (the head, scrolled up).
+Shift Search(const std::vector<uint64_t>& ref, const std::vector<uint64_t>& frame,
+             int maxStep, bool fromTail) {
     Shift best{ 0, 0, true };
-    const int B = (int)tail.size(), h = (int)frame.size();
+    const int B = (int)ref.size(), h = (int)frame.size();
     if (B <= 0 || h < B) return best;
 
-    // Tail row j lines up with frame row h-B-d+j, which has to stay inside the
-    // frame for every j.
+    // The overlap has to stay inside the frame for every row of ref.
     if (maxStep > h - B) maxStep = h - B;
     if (maxStep < 0) maxStep = 0;
 
     for (int d = 0; d <= maxStep; ++d) {
-        const int base = h - B - d;
+        const int base = fromTail ? h - B - d : d;
         int good = 0;
         for (int j = 0; j < B; ++j)
-            if (tail[j] == frame[(size_t)(base + j)]) ++good;
+            if (ref[j] == frame[(size_t)(base + j)]) ++good;
         // Strictly greater, and d walks upward: the first shift that explains
         // the overlap is the one kept.
         if (good > best.matches) {
@@ -74,6 +78,38 @@ Shift FindShift(const std::vector<uint64_t>& tail, const std::vector<uint64_t>& 
         best.jump = true;
     }
     return best;
+}
+
+}  // namespace
+
+Shift FindShift(const std::vector<uint64_t>& tail, const std::vector<uint64_t>& frame,
+                int maxStep) {
+    return Search(tail, frame, maxStep, true);
+}
+
+Shift FindUpShift(const std::vector<uint64_t>& head,
+                  const std::vector<uint64_t>& frame, int maxStep) {
+    return Search(head, frame, maxStep, false);
+}
+
+int FindInside(const std::vector<uint64_t>& doc, const std::vector<uint64_t>& frame) {
+    const int n = (int)doc.size(), h = (int)frame.size();
+    if (h <= 0 || h > n) return -1;
+
+    // The frame's middle row is the one least likely to be covered by the prompt
+    // card or a blinking caret, so it is what the document is scanned for; the
+    // quarter row filters the collisions before the whole frame is walked.
+    const int mid = h / 2, quarter = h / 4, need = h - Tolerance(h);
+    for (int d = mid; d <= n - h + mid; ++d) {
+        if (doc[(size_t)d] != frame[(size_t)mid]) continue;
+        const int o = d - mid;  // document row holding frame row 0
+        if (doc[(size_t)(o + quarter)] != frame[(size_t)quarter]) continue;
+        int good = 0;
+        for (int j = 0; j < h; ++j)
+            if (doc[(size_t)(o + j)] == frame[(size_t)j]) ++good;
+        if (good >= need) return o;
+    }
+    return -1;
 }
 
 }  // namespace ls

@@ -129,25 +129,65 @@ function Toolbar($overlay) {
 # Channel distance between $a[$ax,$ay] and $b[$bx,$by]. (Not "Diff": that is
 # Compare-Object's built-in alias, and an unqualified call binds to it.)
 function Dpx($a, $ax, $ay, $b, $bx, $by) {
-    $p = $a.GetPixel($ax, $ay); $q = $b.GetPixel($bx, $by)
-    return [Math]::Abs($p.R - $q.R) + [Math]::Abs($p.G - $q.G) + [Math]::Abs($p.B - $q.B)
+    $dp = $a.GetPixel($ax, $ay); $dq = $b.GetPixel($bx, $by)
+    return [Math]::Abs($dp.R - $dq.R) + [Math]::Abs($dp.G - $dq.G) + [Math]::Abs($dp.B - $dq.B)
 }
-# Fraction of a 5x10 grid of points in the image band at rows [$y0,$y1) that
-# disagree with the desktop shot at the matching screen position.
-function MismatchRate($img, $shot, [int]$iy0, [int]$iy1, [int]$sx, [int]$sy) {
-    $bad = 0; $n = 0
-    for ($r = 0; $r -lt 5; $r++) {
-        $y = [int]($iy0 + ($iy1 - $iy0) * $r / 4)
-        for ($c = 0; $c -lt 10; $c++) {
-            $x = [int](30 + 40 * $c / 9)
-            $n++
-            if ((Dpx $img $x $y $shot ($sx + $x) ($sy + ($y - $iy0))) -gt 24) { $bad++ }
+# Fraction of a grid of points in the image band at rows [$iy0,$iy1) that
+# disagree with the desktop shot at the matching screen position. The columns
+# are the two digits of the line number and nothing else: every other glyph on
+# the line reads the same in every row of the page, so only they can tell one
+# scroll position from another. $ix,$iy offset the image for the calls where it
+# is a whole desktop shot rather than the document.
+# Every local is prefixed: a PowerShell function shares its caller's scope, so a
+# plain $bad here would overwrite the script's own $bad after the call returns.
+function MismatchRate($img, $shot, [int]$iy0, [int]$iy1, [int]$sx, [int]$sy,
+                      [int]$ix = 0, [int]$iy = 0) {
+    $mBad = 0; $mN = 0
+    for ($mr = 0; $mr -lt 8; $mr++) {
+        $my = [int]($iy0 + ($iy1 - $iy0) * $mr / 7)
+        for ($mc = 0; $mc -lt 10; $mc++) {
+            # 85..125, not 40..80: the hole starts 20px inside the edit's text, so
+            # this band is the two digits. Further left and it is the word LINE,
+            # which reads the same in every row of the page.
+            $mx = [int](85 + 40 * $mc / 9)
+            $mN++
+            if ((Dpx $img ($ix + $mx) ($iy + $my) $shot ($sx + $mx) ($sy + ($my - $iy0))) -gt 24) {
+                $mBad++
+            }
         }
     }
-    return ($bad / $n)
+    return ($mBad / $mN)
+}
+# How many pixels along a row are the default annotation red (F73840). The
+# stitched page is black on white and the frame line is blue, so a row with a
+# long red run is the edge of a drawn rectangle.
+function RedRun($bmp, [int]$y, [int]$x0, [int]$x1) {
+    $rn = 0
+    for ($rx = $x0; $rx -le $x1; $rx++) {
+        $rp = $bmp.GetPixel($rx, $y)
+        if ($rp.R -gt 180 -and $rp.G -lt 120 -and $rp.B -lt 120) { $rn++ }
+    }
+    return $rn
+}
+# Topmost row in [$y0,$y1) whose red run reaches $want.
+function TopRedRow($bmp, [int]$y0, [int]$y1, [int]$x0, [int]$x1, [int]$want) {
+    for ($ty = $y0; $ty -lt $y1; $ty++) { if ((RedRun $bmp $ty $x0 $x1) -ge $want) { return $ty } }
+    return -1
+}
+# The ring the app draws around the stitched preview: kFrame, the same blue as
+# the selection frame.
+function IsRing($bmp, [int]$x, [int]$y) {
+    $c = $bmp.GetPixel($x, $y)
+    return ([Math]::Abs($c.R - 30) -le 20 -and [Math]::Abs($c.G - 159) -le 20 -and
+            [Math]::Abs($c.B - 212) -le 20)
 }
 
 $fail = @()
+$SCREEN = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds
+# 编辑 sizes its frame from the screen: 80% of the height at most, centred, and
+# kGap (2px) between the frame and the toolbar under it.
+$FRAME_H = [int]($SCREEN.Height * 80 / 100)
+$GAP = 2
 
 Get-Process winshot -ErrorAction SilentlyContinue | Stop-Process -Force
 Start-Sleep -Milliseconds 600
@@ -169,7 +209,7 @@ $box.Multiline = $true
 $box.ReadOnly = $true
 $box.ScrollBars = 'Vertical'
 $box.Dock = 'Fill'
-$box.Font = New-Object System.Drawing.Font('Consolas', 22)
+$box.Font = New-Object System.Drawing.Font('Consolas', 30)
 $box.Text = (1..60 | ForEach-Object { 'LINE {0:D2} ------------------------------' -f $_ }) -join "`r`n"
 [void]$sample.Controls.Add($box)
 $sample.Show()
@@ -254,13 +294,69 @@ $box.Select(0, 0)
 $topAt = { $box.GetCharIndexFromPosition((New-Object System.Drawing.Point(5, 5))) }
 $topBefore = & $topAt
 "top char before scrolling = $topBefore"
-for ($i = 0; $i -lt 6; $i++) { WheelTo $box.Handle (-120 * 3) ($SX0 + 60) ($SY0 + 60) }
+# Far enough that the document outgrows the 80%-of-screen frame 编辑 will put it
+# in, so the frame has to scroll. The box has 60 lines and shows about 15 at this
+# font, which is ~45 lines of travel — more than the frame needs.
+for ($i = 0; $i -lt 16; $i++) { WheelTo $box.Handle (-120 * 3) ($SX0 + 60) ($SY0 + 60) }
 $topAfter = & $topAt
 "top char after scrolling  = $topAfter"
 Start-Sleep -Milliseconds 800
 $after = Grab 'D:\Project\winshot\obj\s8_after.png'
 
-# --- 编辑 back into the editor, then ✓ to the clipboard ---------------------
+# --- the preview panel: shrunk to the screen, not to the document -----------
+# By now the document is far taller than the screen, so the panel beside the hole
+# has to be as tall as the screen allows and no taller, its width scaled with it.
+# Only the drawing shrinks — the ✓ check below confirms the export kept every row.
+# The ring is 2px, so its left edge is the first column left of the hole with a
+# blue run the height of the screen; the hole's own ring is only $SH tall and
+# would need 700 samples to pass for it.
+$pvCol = -1
+foreach ($px in 1200..($SX0 - 1)) {
+    $n2 = 0
+    for ($py = 0; $py -lt $SCREEN.Height; $py += 3) { if (IsRing $after $px $py) { $n2++ } }
+    if ($n2 -gt 400) { $pvCol = $px; break }
+}
+$pvT = -1; $pvB = -1
+if ($pvCol -gt 0) {
+    for ($py = 0; $py -lt $SCREEN.Height; $py++) {
+        if (IsRing $after $pvCol $py) { if ($pvT -lt 0) { $pvT = $py }; $pvB = $py }
+    }
+}
+$pvH = $pvB - $pvT + 1
+"preview panel: left=$pvCol top=$pvT bottom=$pvB height=$pvH (want <= $($SCREEN.Height))"
+if ($pvCol -lt 0) { $fail += 'no stitched preview panel beside the hole' }
+else {
+    if ($pvH -gt $SCREEN.Height) { $fail += "the preview is $pvH px tall, taller than the screen" }
+    if ($pvH -lt ($SCREEN.Height - 60)) {
+        $fail += "the preview is only $pvH px tall, want it to fill the screen height"
+    }
+}
+
+# --- no ghosts beside the hole ---------------------------------------------
+# The loupe and the selection frame used to be painted into the dim band and left
+# there, so a stack of half-erased magnifier cards and blue frames piled up on the
+# left and below. Nothing cyan should survive outside the hole at all.
+$ghost = 0
+for ($gy = 0; $gy -lt $SCREEN.Height; $gy += 5) {
+    for ($gx = 1200; $gx -lt $SX0; $gx += 5) {
+        $gc = $after.GetPixel($gx, $gy)
+        if ([Math]::Abs($gc.R - 77) -le 12 -and [Math]::Abs($gc.G - 202) -le 12 -and
+            [Math]::Abs($gc.B - 250) -le 12) { $ghost++ }
+    }
+}
+"loupe-colour px left of the hole: $ghost (want 0)"
+if ($ghost -gt 0) { $fail += "the loupe leaves $ghost px beside the hole" }
+
+# And the prompt card has to be one window that stays put, not one rebuilt on
+# every repaint — that rebuild is what made it flicker.
+$tip1 = @(Find-Win 'WinShotLongTip')
+Start-Sleep -Milliseconds 700
+$tip2 = @(Find-Win 'WinShotLongTip')
+"tip windows: $($tip1.Count) then $($tip2.Count); same handle: $($tip1.Count -eq 1 -and $tip2.Count -eq 1 -and $tip1[0] -eq $tip2[0])"
+if ($tip1.Count -ne 1 -or $tip2.Count -ne 1) { $fail += 'the prompt card is not a single window' }
+elseif ($tip1[0] -ne $tip2[0]) { $fail += 'the prompt card is recreated between repaints, which is what makes it flicker' }
+
+# --- 编辑: the document in a frame, scrolled by the wheel -------------------
 $editX = $lb.left + 22
 $editY = [int](($lb.top + $lb.bottom) / 2)
 "编辑 at $editX,$editY"
@@ -271,26 +367,78 @@ if (@(Find-Win 'WinShotLongBar').Count -ne 0) { $fail += '编辑 left the long-s
 $ov2 = @(Find-Win 'WinShotOverlay')
 if ($ov2.Count -eq 0) { "FAIL: 编辑 closed the capture"; exit 1 }
 $bar2 = Toolbar $ov2[0]
+if (-not $bar2) { $fail += 'the capture toolbar did not come back after 编辑'; exit 1 }
+
+# 编辑 no longer spreads the document over the whole screen: it cuts a frame out
+# of the middle of it, as wide as the image, 80% of the screen tall once the
+# image outgrows that, and centred. The toolbar hangs off the frame's bottom.
+$FL = $bar2.left
+$FB = $bar2.top - $GAP
+$FT = $FB - $FRAME_H
+$wantL = [int](($SCREEN.Width - $SW) / 2)
+$wantT = [int](($SCREEN.Height - $FRAME_H) / 2)
+"frame after 编辑: $FL,$FT .. $($FL + $SW),$FB  (want left=$wantL top=$wantT)"
+if ($FL -ne $wantL) { $fail += "the 编辑 frame is not centred horizontally (left $FL, want $wantL)" }
+if ($FT -ne $wantT) { $fail += "the 编辑 frame is not 80% of the screen tall and centred (top $FT, want $wantT)" }
+
+# Rows 0..$SH of the document are the hole as it stood before any scrolling, so
+# the frame has to show the pre-scroll desktop at the same offset.
+# Sample the middle of a glyph on six different lines, at the columns the line
+# number occupies: the rest of the line is dashes, identical wherever the page
+# happens to be.
+# Rows 1..5: the scrolled check looks these rows up 300px further down the
+# pre-scroll hole, and the hole is only $SH tall, so the row has to stay under
+# $SH - 300.
+$ROWS = 1..5 | ForEach-Object { [int]($_ * $LINEH + $LINEH / 4) }
+# The digits of the line number, not the word LINE in front of them: only the
+# digits change from row to row, so only they can tell one page offset from
+# another.
+$COLS = 90, 100, 112, 122
 $edit = Grab 'D:\Project\winshot\obj\s8_edit.png'
-# Below the fold the selection now covers rows that were never on screen: they
-# have to show the stitched document, not the dimmed live desktop from 长截图.
-$stale = 0
-foreach ($y in @(1100, 1300, 1450, 1600)) {
-    $c = $edit.GetPixel(2600, $y); $s0 = $shot.GetPixel(2600, $y)
-    $d = [Math]::Abs($c.R - $s0.R) + [Math]::Abs($c.G - $s0.G) + [Math]::Abs($c.B - $s0.B)
-    "  below the fold y=$y after 编辑=$($c.R),$($c.G),$($c.B)  dimmed desktop was=$($s0.R),$($s0.G),$($s0.B)"
-    if ($d -lt 40) { $stale++ }
-}
-if ($stale) { $fail += "the grown selection still shows the dimmed desktop at $stale of 4 rows below the fold" }
-if (-not $bar2) { $fail += 'the capture toolbar did not come back after 编辑' }
-if ($bar2) {
-    # The stitched document runs past the bottom of the screen, so the toolbar
-    # flips to the other side of the selection: bottom edge 2px above its top.
-    "toolbar after 编辑: $($bar2.left),$($bar2.top) .. $($bar2.right),$($bar2.bottom) (want bottom=$($SY0-2))"
-    if ($bar2.bottom -ne ($SY0 - 2) -or $bar2.top -ne ($SY0 - 34)) {
-        $fail += 'the toolbar did not follow the grown selection'
+$off = 0; $n = $ROWS.Count * $COLS.Count
+foreach ($r in $ROWS) {
+    foreach ($dx in $COLS) {
+        if ((Dpx $edit ($FL + $dx) ($FT + $r) $before ($SX0 + $dx) ($SY0 + $r)) -gt 24) { $off++ }
     }
 }
+"frame content vs the pre-scroll desktop: $off of $n samples disagree (want 0)"
+if ($off) { $fail += "the 编辑 frame shows the wrong rows at $off of $n points" }
+
+# Draw something, then scroll: the ink belongs to the page, so it has to move by
+# exactly what the wheel moved. 矩形 is slot 0.
+Click ((SlotX $bar2.left 0) + [int]($CELL / 2)) ([int](($bar2.top + $bar2.bottom) / 2))
+Drag ($FL + 120) ($FB - 460) ($FL + 520) ($FB - 300)
+$e1 = Grab 'D:\Project\winshot\obj\s8_edit1.png'
+# Not $N: PowerShell names are case-insensitive, so $N would be $n, the sample
+# count above.
+# Three notches the way a wheel is tilted to move a page down, and the overlay
+# moves 100px per notch.
+$SCROLL = 300
+$w = [IntPtr]((-120 * 3) -shl 16)
+$l = [IntPtr]((600 -shl 16) -bor (($FL + 300) -band 0xFFFF))
+[void][W8]::PostMessage($ov2[0], 0x020A, $w, $l)
+[System.Windows.Forms.Application]::DoEvents()
+Start-Sleep -Milliseconds 500
+[System.Windows.Forms.Application]::DoEvents()
+$e2 = Grab 'D:\Project\winshot\obj\s8_edit2.png'
+
+$rx0 = $FL + 100; $rx1 = $FL + 540
+$top1 = TopRedRow $e1 $FT $FB $rx0 $rx1 350
+$top2 = TopRedRow $e2 $FT $FB $rx0 $rx1 350
+"rectangle top edge: $top1 before the wheel, $top2 after (want a $SCROLL px rise)"
+if ($top1 -lt 0 -or $top2 -lt 0) { $fail += 'the drawn rectangle is not visible in the 编辑 frame' }
+elseif ($top1 - $top2 -ne $SCROLL) { $fail += "the wheel moved the page but not the ink (edges $top1 -> $top2)" }
+
+# And the page itself: after scrolling down $SCROLL rows, the frame shows what sat
+# $SCROLL rows lower, which for these rows is still the pre-scroll desktop.
+$bad = 0
+foreach ($r in $ROWS) {
+    foreach ($dx in $COLS) {
+        if ((Dpx $e2 ($FL + $dx) ($FT + $r) $before ($SX0 + $dx) ($SY0 + $r + $SCROLL)) -gt 24) { $bad++ }
+    }
+}
+"scrolled frame vs the desktop $SCROLL rows lower: $bad of $n samples disagree (want 0)"
+if ($bad) { $fail += "the wheel did not move the page by $SCROLL rows at $bad of $n points" }
 
 if (-not $bar2) { "FAIL: no toolbar to finish with"; exit 1 }
 [System.Windows.Forms.Clipboard]::SetText('EMPTY')
@@ -322,6 +470,11 @@ if ($clip.Height -le $SH + 300) { $fail += "stitched height $($clip.Height) did 
 if ([Math]::Abs($clip.Height - $wantH) -gt 2 * $LINEH) {
     $fail += "stitched height $($clip.Height) is not the $([Math]::Round($lines, 1))-line scroll of the target (want $wantH)"
 }
+# The preview on screen was capped at the screen's height while the document kept
+# every row: shrinking the picture, not the image.
+if ($pvCol -gt 0 -and $pvH -ge $clip.Height) {
+    $fail += "the preview showed all $($clip.Height) rows at $pvH px; it should have shrunk to fit the screen"
+}
 $c = $clip.Clone([System.Drawing.Rectangle]::new(0, 0, $clip.Width, $clip.Height), $clip.PixelFormat)
 $c.Save('D:\Project\winshot\obj\s8_result.png'); $c.Dispose()
 
@@ -331,7 +484,7 @@ $c.Save('D:\Project\winshot\obj\s8_result.png'); $c.Dispose()
 $topVsBefore = MismatchRate $clip $before 0 40 $SX0 $SY0
 $botVsAfter = MismatchRate $clip $after ($clip.Height - 40) ($clip.Height - 6) $SX0 ($SY1 - 40)
 $topVsAfter = MismatchRate $clip $after 0 40 $SX0 $SY0
-$scrolled = MismatchRate $before $after 0 40 $SX0 $SY0
+$scrolled = MismatchRate $before $after 0 40 $SX0 $SY0 $SX0 $SY0
 # Every line of the target reads the same but for its number, and the scroll is
 # a whole number of lines, so the absolute rate is small; the claim is that the
 # top of the document agrees with the pre-scroll desktop and disagrees with the

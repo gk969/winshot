@@ -28,6 +28,13 @@ public:
     }
 
     Gdiplus::RectF BBox() const override { return m_box; }
+    // The outline is painted centred on the box, so half the pen hangs outside
+    // it — the only shape whose drawn box is not its handle box.
+    Gdiplus::RectF InkBBox() const override {
+        const Gdiplus::REAL pad = m_pen / 2.0f;
+        return Gdiplus::RectF(m_box.X - pad, m_box.Y - pad,
+                              m_box.Width + pad * 2.0f, m_box.Height + pad * 2.0f);
+    }
     int HandleCount() const override { return kBoxHandles; }
     Gdiplus::PointF HandleAt(int i) const override { return BoxHandleAt(m_box, i); }
     void MoveHandle(int i, Gdiplus::PointF pt) override { BoxResize(m_box, i, pt); }

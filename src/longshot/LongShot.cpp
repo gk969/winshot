@@ -437,8 +437,9 @@ bool Controller::Start() {
     m_hole = sel;
     m_hole.OffsetRect(ov.Origin().x, ov.Origin().y);
     m_w = w;
-    m_rows = m_cap = 0;
-    m_px.clear();
+    m_first = m_rows = m_cap = 0;
+    m_px = std::vector<uint32_t>();
+    m_sigs = std::vector<uint64_t>();
     m_tail = (std::min)(kMaxTail, h / 2);
     m_maxStep = h - m_tail;
     m_maxRows = (std::min)(kMaxHeight, (int)(kMaxBytes / (4ull * (size_t)w)));
@@ -491,23 +492,40 @@ void Controller::Stop() {
 void Controller::Tick() {
     if (!m_active || m_stopped) return;
 
-    const bool tipUp = m_tipWnd && ::IsWindowVisible(m_tipWnd->GetSafeHwnd());
-    if (tipUp) m_tipWnd->HideForGrab();
+    // The card sits inside the hole, so a grab would stitch it into the
+    // document and hiding it is the only way out. Hiding it on every grab is
+    // what made it blink six times a second, though: it is only ever in the way
+    // of a grab that appends rows, so the probe runs with it up and only a frame
+    // that has actually moved gets a second, clean grab. That happens once — the
+    // first append takes the card away for good.
+    const bool probe = m_showTip && m_tipWnd &&
+                       ::IsWindowVisible(m_tipWnd->GetSafeHwnd());
     Frame f;
-    const bool ok = GrabFrame(m_hole, f);
-    if (tipUp) m_tipWnd->ShowAgain();
-    if (!ok || f.width != m_w || f.height != m_sel.Height()) return;
-
-    const Shift sh = FindShift(TailSignatures(), f.sigs, m_maxStep);
+    if (!GrabFrame(m_hole, f)) return;
+    if (f.width != m_w || f.height != m_sel.Height()) return;
+    Shift sh = Match(f.sigs);
+    // A short hole puts the card inside the band the match reads, so a shift or
+    // a jump there has to be confirmed the same way rather than acted on.
+    if (probe && (sh.rows != 0 || sh.jump)) {
+        m_tipWnd->HideForGrab();
+        if (GrabFrame(m_hole, f)) sh = Match(f.sigs);
+        else sh = Shift{};
+        if (sh.rows == 0 && !sh.jump) m_tipWnd->ShowAgain();
+    }
     if (sh.jump) {
         m_stopped = true;
         StopPolling();
         ShowStatus(L"画面变化过大，已停止自动拼接");
         return;
     }
-    if (sh.rows <= 0) return;
+    if (sh.rows == 0) return;
 
-    if (!AppendRows(f, f.height - sh.rows, sh.rows)) {
+    // Negative rows means the pointer scrolled up, and the new content is at the
+    // top of the frame rather than the bottom.
+    const int n = abs(sh.rows);
+    const bool added = sh.rows > 0 ? AppendRows(f, f.height - n, n)
+                                   : PrependRows(f, 0, n);
+    if (!added) {
         m_stopped = true;
         StopPolling();
         ShowStatus(L"已达到最大长度");
@@ -526,57 +544,161 @@ void Controller::Tick() {
 bool Controller::AppendRows(const Frame& f, int from, int count) {
     if (count <= 0) return true;
     if (f.width != m_w || from < 0 || from + count > f.height) return false;
-    if (!EnsureCapacity(m_rows + count)) return false;
+    if (!GrowFor(0, count)) return false;
 
     const uint32_t* src = f.px.data() + (size_t)from * (size_t)m_w;
-    uint32_t* dst = m_px.data() + (size_t)m_rows * (size_t)m_w;
+    uint32_t* dst = Row(m_rows);
     std::memcpy(dst, src, (size_t)count * (size_t)m_w * sizeof(uint32_t));
+    for (int i = 0; i < count; ++i)
+        *SigRow(m_rows + i) = RowSignature(src + (size_t)i * (size_t)m_w, m_w);
     m_rows += count;
     return true;
 }
 
-bool Controller::EnsureCapacity(int rows) {
-    if (rows <= m_cap) return true;
-    if (rows > m_maxRows) return false;
-    int want = m_cap > 0 ? m_cap * 2 : rows;
-    if (want < rows) want = rows;
+// Scrolling up brings the new rows in at the top of the frame and above the
+// document, which is the direction the buffer used to have no room for.
+bool Controller::PrependRows(const Frame& f, int from, int count) {
+    if (count <= 0) return true;
+    if (f.width != m_w || from < 0 || from + count > f.height) return false;
+    if (!GrowFor(count, 0)) return false;
+
+    const uint32_t* src = f.px.data() + (size_t)from * (size_t)m_w;
+    m_first -= count;
+    std::memcpy(Row(0), src, (size_t)count * (size_t)m_w * sizeof(uint32_t));
+    for (int i = 0; i < count; ++i)
+        *SigRow(i) = RowSignature(src + (size_t)i * (size_t)m_w, m_w);
+    m_rows += count;
+    return true;
+}
+
+bool Controller::GrowFor(int before, int after) {
+    const int need = m_rows + before + after;
+    if (need > m_maxRows) return false;
+    if (m_first >= before && m_first + need <= m_cap) return true;
+
+    int want = m_cap > 0 ? m_cap * 2 : need;
+    if (want < need) want = need;
     if (want > m_maxRows) want = m_maxRows;
+    std::vector<uint32_t> next;
+    std::vector<uint64_t> nextSigs;
     try {
-        m_px.resize((size_t)want * (size_t)m_w);
+        next.resize((size_t)want * (size_t)m_w);
+        nextSigs.resize((size_t)want);
     } catch (const std::bad_alloc&) {
         return false;
     }
+    // The document moves to the middle of the new buffer, which is what leaves
+    // both ends free to grow; the clamp keeps it clear of the rows being added.
+    int first = (want - m_rows) / 2;
+    first = std::clamp(first, before, want - m_rows - after);
+    std::memcpy(next.data() + (size_t)first * (size_t)m_w, Row(0),
+                (size_t)m_rows * (size_t)m_w * sizeof(uint32_t));
+    if (m_rows > 0)
+        std::memcpy(nextSigs.data() + first, SigRow(0),
+                    (size_t)m_rows * sizeof(uint64_t));
+    m_px.swap(next);
+    m_sigs.swap(nextSigs);
     m_cap = want;
+    m_first = first;
     return true;
 }
 
 std::vector<uint64_t> Controller::TailSignatures() const {
     const int n = (std::min)(m_tail, m_rows);
-    if (n <= 0) return {};
-    return RowSignatures(m_px.data() + (size_t)(m_rows - n) * (size_t)m_w, m_w, n, m_w);
+    std::vector<uint64_t> out;
+    out.reserve((size_t)n);
+    for (int i = 0; i < n; ++i) out.push_back(RowSignature(Row(m_rows - n + i), m_w));
+    return out;
 }
 
-void Controller::Paint(Gdiplus::Graphics& g) {
-    if (!m_active || !m_preview || m_rows <= 0) return;
+std::vector<uint64_t> Controller::HeadSignatures() const {
+    const int n = (std::min)(m_tail, m_rows);
+    std::vector<uint64_t> out;
+    out.reserve((size_t)n);
+    for (int i = 0; i < n; ++i) out.push_back(RowSignature(Row(i), m_w));
+    return out;
+}
+
+// A scroll can go either way: the tail lines up when new content appeared below,
+// the head when it appeared above. Asking the tail first and taking whatever it
+// returns is wrong in both directions — once the document has grown past one
+// frame, the end that is off screen still lines up on the blank rows between
+// lines of text, and the tolerance that lets a blinking caret through is loose
+// enough to call that a match. So both ends are asked and the better-evidenced
+// one decides.
+Shift Controller::Match(const std::vector<uint64_t>& sigs) const {
+    const Shift down = FindShift(TailSignatures(), sigs, m_maxStep);
+    if (down.rows == 0 && !down.jump) return down;  // the page did not move
+
+    const Shift up = FindUpShift(HeadSignatures(), sigs, m_maxStep);
+    if (up.rows == 0 && !up.jump) return up;  // a repaint the tail alone misread
+
+    if (!down.jump && (up.jump || down.matches >= up.matches)) return down;
+    if (!up.jump) {
+        Shift s{};
+        s.rows = -up.rows;
+        s.matches = up.matches;
+        return s;
+    }
+    if (!down.jump) return down;
+
+    // Neither end lines up, which is what a scroll back over the middle of the
+    // document looks like: the frame is already part of the image, so there is
+    // nothing to add and no page turn to stop for. Only a frame that is nowhere
+    // in the document is a real jump.
+    const std::vector<uint64_t> all(m_sigs.begin() + m_first,
+                                    m_sigs.begin() + m_first + m_rows);
+    if (FindInside(all, sigs) >= 0) return Shift{};
+
+    Shift s{};
+    s.jump = true;
+    return s;
+}
+
+// The stitched document beside the hole, as the overlay has to ink it. It shows
+// the whole document, shrunk to the screen's height once the document outgrows
+// the screen — only the drawing shrinks, the rows and the export keep their
+// real size.
+CRect Controller::PreviewRect() const {
+    if (!m_active || !m_preview || m_rows <= 0) return CRect();
 
     CRect cl;
     m_session->Overlay().GetClientRect(&cl);
-    const int shown = (std::min)(m_rows, (int)(m_sel.bottom - cl.top));
-    if (shown <= 0) return;
+    const HWND hwnd = m_session->Overlay().GetSafeHwnd();
+    const int pad = Dpi::S(hwnd, 9);
 
-    int x = m_sel.right + Dpi::S(m_session->Overlay().GetSafeHwnd(), 9);
-    if (x + m_w > cl.right) x = m_sel.left - Dpi::S(m_session->Overlay().GetSafeHwnd(), 9) - m_w;
-    if (x < cl.left) return;  // neither side of the hole has room
-    const int y = m_sel.bottom - shown;
+    int x = m_sel.right + pad;
+    if (x + m_w > cl.right) x = m_sel.left - pad - m_w;
+    if (x < cl.left) return CRect();  // neither side of the hole has room
+
+    const int budget = (std::max)(1, cl.Height() - pad * 2);
+    const int h = (std::min)(m_rows, budget);
+    const int w = (std::max)(1, MulDiv(m_w, h, m_rows));
+    int y = m_sel.bottom - h;
+    if (y < cl.top + pad) y = cl.top + pad;
+    if (x + w > cl.right) x = cl.right - w;
+    return CRect(x, y, x + w, y + h);
+}
+
+void Controller::Paint(Gdiplus::Graphics& g) {
+    const CRect r = PreviewRect();
+    if (r.IsRectEmpty()) return;
 
     Gdiplus::Bitmap bmp(m_w, m_rows, m_w * (int)sizeof(uint32_t),
-                        PixelFormat32bppARGB, (BYTE*)m_px.data());
-    g.DrawImage(&bmp, Gdiplus::Rect(x, y, m_w, shown), 0, m_rows - shown, m_w, shown,
-                Gdiplus::UnitPixel);
+                        PixelFormat32bppARGB, (BYTE*)Row(0));
+    const Gdiplus::GraphicsState gs = g.Save();
+    // Nearest neighbour drops whole rows on a shrink and leaves the preview
+    // looking torn; it is only right when the preview is 1:1.
+    g.SetInterpolationMode(r.Height() < m_rows
+                               ? Gdiplus::InterpolationModeBilinear
+                               : Gdiplus::InterpolationModeNearestNeighbor);
+    g.DrawImage(&bmp, Gdiplus::Rect(r.left, r.top, r.Width(), r.Height()),
+                0, 0, m_w, m_rows, Gdiplus::UnitPixel);
+    g.Restore(gs);
 
     Gdiplus::Pen ring(kFrame, 2.0f);
-    g.DrawRectangle(&ring, (Gdiplus::REAL)x - 1.0f, (Gdiplus::REAL)y - 1.0f,
-                    (Gdiplus::REAL)m_w + 2.0f, (Gdiplus::REAL)shown + 2.0f);
+    g.DrawRectangle(&ring, (Gdiplus::REAL)r.left - 1.0f, (Gdiplus::REAL)r.top - 1.0f,
+                    (Gdiplus::REAL)r.Width() + 2.0f, (Gdiplus::REAL)r.Height() + 2.0f);
 }
 
 bool Controller::SizeText(CString* text) const {
@@ -599,8 +721,7 @@ std::unique_ptr<Gdiplus::Bitmap> Controller::TakeResult() {
         return nullptr;
     const size_t bytes = (size_t)m_w * sizeof(uint32_t);
     for (int y = 0; y < m_rows; ++y)
-        memcpy((unsigned char*)d.Scan0 + (size_t)y * d.Stride,
-               m_px.data() + (size_t)y * m_w, bytes);
+        memcpy((unsigned char*)d.Scan0 + (size_t)y * d.Stride, Row(y), bytes);
     bmp->UnlockBits(&d);
     return bmp;
 }
@@ -640,9 +761,8 @@ void Controller::OnEdit() {
 void Controller::RunEdit() {
     if (!m_active) return;
     std::unique_ptr<Gdiplus::Bitmap> bmp = TakeResult();
-    const POINT anchor = m_hole.TopLeft();
     Stop();
-    if (bmp) m_session->EndLongShot(std::move(bmp), anchor);
+    if (bmp) m_session->EndLongShot(std::move(bmp));
 }
 
 void Controller::OnSave() {

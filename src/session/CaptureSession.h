@@ -105,15 +105,38 @@ public:
     void ToggleLongShot();
     // The overlay's queue runs this after the long-shot bar's own click.
     void RunLongShotEdit();
-    // Adopts the stitched image as this session's still, anchored at `anchor`
-    // (screen coordinates), and makes the selection cover all of it.
-    void EndLongShot(std::unique_ptr<Gdiplus::Bitmap> bmp, POINT anchor);
+    // Adopts the stitched image as this session's still and turns the selection
+    // into a viewport onto it, centred on the screen.
+    void EndLongShot(std::unique_ptr<Gdiplus::Bitmap> bmp);
+
+    // ---- 长截图 编辑 ----
+
+    // True once 编辑 has taken over: the selection is then the frame the user
+    // edits through, not a region of the still.
+    bool LongShotEdit() const { return m_lsEdit; }
+    // Moves the document under that frame by `delta` rows (positive shows rows
+    // further down the page), taking the annotations with it. False when the
+    // document cannot move that way, so the caller can leave the wheel alone.
+    bool ScrollLongShot(int delta);
+    // What the frame's scrollbar is drawn from: rows hidden above the top edge,
+    // and the largest that count can be.
+    int LongShotScroll() const { return m_lsScroll; }
+    int LongShotMaxScroll() const;
+    // The desktop still the document replaced, kept so the area outside the
+    // locked frame still reads as the screen rather than as bare dim.
+    Gdiplus::Bitmap* Backdrop() const { return m_backdrop.get(); }
+    POINT BackdropOff() const { return m_backdropOff; }
+    // What ✓ / 保存 / 钉住 / OCR render. Normally the selection; while the 编辑
+    // frame is open the whole stitched document, since the frame only selects
+    // which part of it is on screen to be edited.
+    CRect ExportRect() const;
 
     // Reached through the overlay, which is what draws both.
     bool LongShotSizeText(CString& text) const;
     bool HitLongShotCaret(CPoint pt) const;
     void ToggleLongShotPreview();
     void PaintLongShot(Gdiplus::Graphics& g);
+    CRect LongShotPreviewRect() const;
     void SetLongShotCaret(const CRect& r);
 
     // The colour the edit box is filled with: the average of the still under it.
@@ -144,6 +167,15 @@ private:
     int m_selIdx = -1;
     std::unique_ptr<CTextEditor> m_editor;
     bool m_ocrBusy = false;
+    // 长截图 编辑: the still is a stitched document taller than the frame that
+    // shows it, and m_lsScroll is how many of its rows are above the top edge.
+    bool m_lsEdit = false;
+    int m_lsScroll = 0;
+    // The still EndLongShot replaced, and where it started in client space at
+    // the time. The overlay's own origin moves as the document scrolls, so the
+    // backdrop has to remember its own.
+    std::unique_ptr<Gdiplus::Bitmap> m_backdrop;
+    POINT m_backdropOff = {};
     // Overlay-client rect of the open 字号 list, empty when it is closed.
     CRect m_fontDrop;
 };

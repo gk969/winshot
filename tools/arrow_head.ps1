@@ -1,4 +1,6 @@
-# The arrow head has to read as an arrow head. The measure that shows it is the
+# The arrow head has to read as an arrow head, and the three widths have to read
+# as three different triangles: the widest keeps the reference size and the two
+# thinner ones are two thirds and a half of it. The measure that shows both is the
 # ink width straight across the arrow near its tip: a head flares to several times
 # the shaft, a headless line stays one width throughout.
 Add-Type -AssemblyName System.Drawing, System.Windows.Forms
@@ -90,6 +92,7 @@ function Cross($bmp, [int]$x, [int]$y0, [int]$y1) {
     for ($y = $y0; $y -le $y1; $y++) { if (IsRed ($bmp.GetPixel($x, $y))) { $n++ } }
     return $n
 }
+function IsBlue($c) { return ($c.B -gt 150 -and ($c.B - $c.R) -gt 60 -and ($c.B - $c.G) -gt 30) }
 
 $sel = @(800, 600, 1500, 1050)
 $fail = @()
@@ -132,42 +135,86 @@ $arY = [int](($tr.top + $tr.bottom) / 2)
 "clicking the arrow tool at ($arX,$arY)"
 Click $arX $arY
 
-# A horizontal arrow so the head's width is a straight vertical run.
-Drag 900 800 1300 800
-Start-Sleep -Milliseconds 300
-
-$s = Grab 'D:\Project\winshot\obj\ah_arrow.png'
-$box = Ink-Box $s 860 700 1400 900
-if (-not $box) { $s.Dispose(); 'FAIL: the arrow was never drawn'; exit 1 }
-$l = $box.l; $r = $box.r
-
-# Ink width straight across the arrow, measured back from the tip. The arrow tool
-# opens on the thin dot by design, so the head is judged against the shaft it sits
-# on rather than against an absolute pen width.
-$prof = @(0..44 | ForEach-Object { Cross $s ($r - $_) $box.t $box.b })
+# The three width dots are the three leftmost blue blobs in the strip the tool
+# bar hangs below the selection; the palette's own blue chips sit further right.
+# The first dot is the narrowest pen. Blob positions beat the bar's chrome band,
+# which its own icons and chips chop into pieces too small to recognise.
+$s = Grab 'D:\Project\winshot\obj\ah_bar.png'
+$by0 = $tr.bottom + 2
+$by1 = $tr.bottom + [int][Math]::Round(40 * $scale)
+$blueY = @{}
+for ($x = $tr.left; $x -lt $tr.right; $x++) {
+    $n = 0
+    for ($y = $by0; $y -le $by1; $y++) {
+        if (IsBlue ($s.GetPixel($x, $y))) {
+            if (-not $blueY.ContainsKey($x)) { $blueY[$x] = @() }
+            $blueY[$x] += $y
+        }
+    }
+}
 $s.Dispose()
-$shaft = ($prof[36..44] | Measure-Object -Minimum).Minimum
-$head = ($prof[0..30] | Measure-Object -Maximum).Maximum
-$headLen = 0
-foreach ($d in 0..30) { if ($prof[$d] -ge $shaft + 4) { $headLen = $d } }
-"profile back from the tip: " + (($prof | ForEach-Object { "$_" }) -join ' ')
-"arrow ink box ($l,$($box.t))..($r,$($box.b))"
-"shaft=$shaft  head=$head  head length=$headLen px"
-if ($shaft -lt 1 -or $shaft -gt 4) { "FAIL: the shaft is not the arrow tool's 2px dot ($shaft)" }
-if ($head -lt 18) { $fail += "the head is only $head px wide, too small to read as an arrow head" }
-if ($head -lt 6 * $shaft) { $fail += "the head is $head px against a $shaft px shaft — no visible flare" }
-if ($headLen -lt 20) { $fail += "the head is only $headLen px long, too stubby to read as an arrow head" }
+$runs = New-Object System.Collections.ArrayList
+$cur = $null
+foreach ($x in ($blueY.Keys | Sort-Object)) {
+    if ($null -ne $cur -and $x -gt $cur[1] + 2) { [void]$runs.Add($cur); $cur = $null }
+    if ($null -eq $cur) { $cur = @($x, $x) } else { $cur[1] = $x }
+}
+if ($null -ne $cur) { [void]$runs.Add($cur) }
+"blue runs below the toolbar (y $by0..$by1): $((($runs | ForEach-Object { "$($_[0])..$_[1]" }) -join ' '))"
+if ($runs.Count -lt 3) { 'FAIL: the three width dots are not all there'; exit 1 }
+$dotX = @(); $dotY = @()
+foreach ($d in $runs[0], $runs[1], $runs[2]) {
+    $dotX += [int](($d[0] + $d[1]) / 2)
+    $all = @()
+    for ($x = $d[0]; $x -le $d[1]; $x++) { $all += $blueY[$x] }
+    $dotY += [int](($all | Measure-Object -Average).Average)
+}
+"dot centres: $(for ($i = 0; $i -lt 3; $i++) { "($($dotX[$i]),$($dotY[$i]))" })"
 
-# Crop the head for a look.
-$s = Grab ''
-$c = New-Object System.Drawing.Bitmap 110, 90
-$g = [System.Drawing.Graphics]::FromImage($c)
-$g.DrawImage($s, [System.Drawing.Rectangle]::new(0, 0, 110, 90),
-                 [System.Drawing.Rectangle]::new(($r - 80), ($box.t - 20), 110, 90),
-                 [System.Drawing.GraphicsUnit]::Pixel)
-$g.Dispose(); $s.Dispose()
-$c.Save('D:\Project\winshot\obj\ah_head.png')
-$c.Dispose()
+# One arrow per width, each in its own band of the selection, so the three heads
+# can be measured one at a time. Horizontal, so a head's width is a straight
+# vertical run.
+$heads = @()
+for ($i = 0; $i -lt 3; $i++) {
+    Click $dotX[$i] $dotY[$i]
+    # 130 apart with a 110px scan window: the bands must not overlap or the
+    # previous arrow's ink lands in this one's box.
+    $ay = 680 + 130 * $i
+    Drag 900 $ay 1300 $ay
+    Start-Sleep -Milliseconds 250
+
+    $s = Grab "D:\Project\winshot\obj\ah_w$i.png"
+    $box = Ink-Box $s 860 ($ay - 55) 1400 ($ay + 55)
+    if (-not $box) { $s.Dispose(); "FAIL: the arrow for width $i was never drawn"; exit 1 }
+    # Ink width straight across the arrow, measured back from the tip. The head
+    # is a triangle with its base square across the shaft, so the widest column
+    # in that profile is the head's own width and the far columns are the shaft.
+    $prof = @(0..44 | ForEach-Object { Cross $s ($box.r - $_) $box.t $box.b })
+    $s.Dispose()
+    $shaft = ($prof[38..44] | Measure-Object -Minimum).Minimum
+    $head = ($prof[0..34] | Measure-Object -Maximum).Maximum
+    $flare = 0
+    foreach ($d in 0..34) { if ($prof[$d] -gt $shaft) { $flare = $d } }
+    "width $i : shaft=$shaft  head=$head  flare reaches $flare px back"
+    $heads += , @{ shaft = $shaft; head = $head; flare = $flare }
+}
+
+$wide = $heads[2]; $mid = $heads[1]; $thin = $heads[0]
+"head widths: thin=$($thin.head) mid=$($mid.head) wide=$($wide.head)"
+foreach ($h in $heads) {
+    if ($h.head -lt $h.shaft + 8) {
+        $fail += "a $($h.shaft)px arrow head is only $($h.head) px wide, no visible flare"
+    }
+    if ($h.flare -lt 8) { $fail += "an arrow head flares for only $($h.flare) px" }
+}
+if ($mid.head -lt [int]($wide.head * 0.55) -or $mid.head -gt [int]($wide.head * 0.80)) {
+    $fail += "the medium head is $($mid.head) px against the wide $($wide.head) px, want about two thirds"
+}
+if ($thin.head -lt [int]($wide.head * 0.38) -or $thin.head -gt [int]($wide.head * 0.62)) {
+    $fail += "the thin head is $($thin.head) px against the wide $($wide.head) px, want about a half"
+}
+if ($mid.head -le $thin.head) { $fail += 'the medium head is no wider than the thin one' }
+if ($wide.head -le $mid.head) { $fail += 'the wide head is no wider than the medium one' }
 
 if (-not $proc.HasExited) { $proc.Kill() }
 if ($fail.Count) { "FAILURES: $($fail.Count)"; $fail | ForEach-Object { "  $_" }; exit 1 }

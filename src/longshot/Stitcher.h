@@ -36,4 +36,18 @@ Shift FindShift(const std::vector<uint64_t>& tail, const std::vector<uint64_t>& 
 // Rows of overlap that have to agree for a shift to be accepted.
 int Tolerance(int tailRows);
 
+// The same search the other way up. Scrolling up puts new content above what has
+// been accumulated, so the frame's first `rows` rows are the unknown ones and
+// frame row `rows + j` lines up with head row j. `head` is the first B rows of
+// the accumulated image, top first.
+Shift FindUpShift(const std::vector<uint64_t>& head,
+                  const std::vector<uint64_t>& frame, int maxStep);
+
+// Where the frame sits inside the whole accumulated image, as the document row
+// holding frame row 0, or -1 when the frame is not part of it at all. The two
+// end searches above only ever compare against a band at one end, so a frame
+// scrolled back to ground already stitched lines up with neither and reads as a
+// page turn; this is what tells that apart from a real one.
+int FindInside(const std::vector<uint64_t>& doc, const std::vector<uint64_t>& frame);
+
 }  // namespace ls

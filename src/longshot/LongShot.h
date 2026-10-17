@@ -42,7 +42,9 @@ public:
     void RunEdit();
 
     // The stitched tail beside the hole. The overlay draws it because it lives
-    // outside the hole and so survives the window region.
+    // outside the hole and so survives the window region. PreviewRect is the
+    // same box Paint inks, so the overlay can clear and blend just that.
+    CRect PreviewRect() const;
     void Paint(Gdiplus::Graphics& g);
     void SetCaretRect(const CRect& r) { m_caret = r; }
     bool HitCaret(CPoint pt) const;
@@ -61,8 +63,20 @@ private:
     void Tick();
     void PlacePopups();
     bool AppendRows(const Frame& f, int from, int count);
-    bool EnsureCapacity(int rows);
+    bool PrependRows(const Frame& f, int from, int count);
+    // Makes room for `before` rows above and `after` rows below the document,
+    // moving it into a bigger buffer with slack at both ends when there is none.
+    bool GrowFor(int before, int after);
+    const uint32_t* Row(int r) const { return m_px.data() + (size_t)(m_first + r) * m_w; }
+    uint32_t* Row(int r) { return m_px.data() + (size_t)(m_first + r) * m_w; }
+    // The same rows hashed, laid out exactly like m_px, so a scroll back over
+    // ground already stitched can be looked up in the whole document.
+    const uint64_t* SigRow(int r) const { return m_sigs.data() + m_first + r; }
+    uint64_t* SigRow(int r) { return m_sigs.data() + m_first + r; }
     std::vector<uint64_t> TailSignatures() const;
+    std::vector<uint64_t> HeadSignatures() const;
+    // Which way the content moved: rows > 0 is new content below, rows < 0 above.
+    Shift Match(const std::vector<uint64_t>& sigs) const;
     void ShowStatus(const wchar_t* text);
     void StopPolling();
     void Repaint();
@@ -74,8 +88,12 @@ private:
     CRect m_caret{};   // overlay client coords, as last painted
 
     int m_w = 0;       // == m_sel.Width(); every frame is this wide
+    // The document's rows, contiguous so the preview can wrap them directly.
+    // They start at m_first: a scroll up grows the document at the top, and the
+    // slack on that side is what keeps that from copying the whole image.
     std::vector<uint32_t> m_px;
-    int m_rows = 0, m_cap = 0, m_maxRows = 0;
+    std::vector<uint64_t> m_sigs;
+    int m_first = 0, m_rows = 0, m_cap = 0, m_maxRows = 0;
     int m_tail = 0, m_maxStep = 0;
 
     bool m_preview = true;

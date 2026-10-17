@@ -12,12 +12,17 @@ RECT loupe::CardRect(HWND hwnd, CPoint at, const CRect& bounds) {
     const int w = Dpi::S(hwnd, kBoxW);
     // The readout starts on the frame's bottom row, so the two boxes share it.
     const int h = Dpi::S(hwnd, kBoxH) + Dpi::S(hwnd, kInfoH) - 1;
-    int x = at.x - w / 2;
-    int y = at.y - Dpi::S(hwnd, kBoxH) / 2;
-    if (x < bounds.left) x = bounds.left;
-    if (x + w > bounds.right) x = bounds.right - w;
-    if (y < bounds.top) y = bounds.top;
-    if (y + h > bounds.bottom) y = bounds.bottom - h;
+    const int gap = Dpi::S(hwnd, kGap);
+
+    // Below-right of the cursor, clear of it: the card reads the pixel under the
+    // pointer and would be reading itself otherwise. Against an edge it steps to
+    // the cursor's right, then above it, and takes the corner back on its own as
+    // soon as the pointer comes away from the edge.
+    int x = at.x + gap, y = at.y + gap;
+    if (y + h > bounds.bottom) y = at.y - h / 2;
+    if (x + w > bounds.right) { x = at.x - w / 2; y = at.y - gap - h; }
+    x = std::clamp(x, (int)bounds.left, std::max((int)bounds.left, (int)bounds.right - w));
+    y = std::clamp(y, (int)bounds.top, std::max((int)bounds.top, (int)bounds.bottom - h));
     return RECT{ x, y, x + w, y + h };
 }
 
@@ -113,6 +118,7 @@ void loupe::Draw(CaptureSession& session, CPoint at, Gdiplus::Graphics& g,
 bool loupe::CopyColor(const DesktopCapture& cap, CPoint at, POINT off) {
     const COLORREF c = Sampled(cap, at, off);
     CString s;
-    s.Format(L"RGB:(%d,%d,%d)", GetRValue(c), GetGValue(c), GetBValue(c));
+    // The bare triple, so it pastes straight into a colour field.
+    s.Format(L"%d,%d,%d", GetRValue(c), GetGValue(c), GetBValue(c));
     return out::SetText(s.GetString());
 }

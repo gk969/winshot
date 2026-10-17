@@ -11,6 +11,17 @@ public:
     // overlay and the compositor need to know where it starts.
     void Adopt(std::unique_ptr<Gdiplus::Bitmap> image, POINT origin);
 
+    // The still Adopt replaced. 编辑 keeps it as the ground outside the frame,
+    // so it is handed over rather than dropped with the document.
+    std::unique_ptr<Gdiplus::Bitmap> Detach() {
+        m_width = m_height = 0;
+        return std::move(m_image);
+    }
+
+    // Moving an adopted image without replacing it: the 编辑 view scrolls the
+    // stitched document by moving where it starts.
+    void SetOrigin(POINT origin) { m_origin = origin; }
+
     // Non-const because Gdiplus::Graphics::DrawImage takes Image*, not
     // const Image*; the image itself is never mutated after Grab().
     Gdiplus::Bitmap* Image() const { return m_image.get(); }

@@ -103,6 +103,99 @@ int main() {
         Check(!m.jump && m.rows == 17, "a repeating page understitches rather than overlap");
     }
     {
+        // Upward scrolling: the accumulated image now starts at doc row 300, so
+        // its head is those rows, and scrolling up by 37 shows doc row 263 at the
+        // top of the frame.
+        MakeDoc(doc, kW, 1200, 0);
+        const auto headSigs = Sigs(Frame(doc, kW, 300, kB), kW);
+        {
+            auto m = ls::FindUpShift(headSigs, Sigs(Frame(doc, kW, 300, kH), kW), kStep);
+            Check(!m.jump && m.rows == 0, "scrolling up with nothing above reads as zero");
+        }
+        {
+            auto m = ls::FindUpShift(headSigs, Sigs(Frame(doc, kW, 263, kH), kW), kStep);
+            Check(!m.jump && m.rows == 37, "a 37 row scroll up reads as 37");
+        }
+        {
+            auto m = ls::FindUpShift(headSigs, Sigs(Frame(doc, kW, 100, kH), kW), kStep);
+            Check(!m.jump && m.rows == kStep, "a scroll up of exactly maxStep reads as maxStep");
+        }
+        {
+            auto m = ls::FindUpShift(headSigs, Sigs(Frame(doc, kW, 50, kH), kW), kStep);
+            Check(m.jump && m.rows == 0, "a scroll up past the search band is a jump");
+        }
+        {
+            // The direction the other search would have taken: the head cannot
+            // line up anywhere, so the controller has to be told not to prepend.
+            auto m = ls::FindUpShift(headSigs, Sigs(Frame(doc, kW, 337, kH), kW), kStep);
+            Check(m.jump, "a scroll down is a jump for the head");
+        }
+        {
+            auto raw = Frame(doc, kW, 263, kH);
+            for (int r = 40; r < 50; ++r)
+                for (int x = 0; x < kW; ++x) raw[(size_t)r * kW + x] = 0xFF202020u;
+            auto m = ls::FindUpShift(headSigs, Sigs(raw, kW), kStep);
+            Check(!m.jump && m.rows == 37, "a disturbed band does not move a scroll up");
+        }
+    }
+    {
+        // A scroll back over ground already stitched. Neither end band lines up
+        // there, so only a lookup in the whole document tells that apart from a
+        // page turn — which is what stopped the session on the way back up.
+        MakeDoc(doc, kW, 2000, 0);
+        const auto whole = Sigs(doc, kW);
+        // The accumulated image is doc rows 400..999, so the answer counts from
+        // row 400, exactly as the controller's buffer does.
+        const std::vector<uint64_t> acc(whole.begin() + 400, whole.begin() + 1000);
+        {
+            auto f = Sigs(Frame(doc, kW, 500, kH), kW);
+            Check(ls::FindInside(acc, f) == 100, "a frame from the middle reads as its offset");
+        }
+        {
+            auto f = Sigs(Frame(doc, kW, 400, kH), kW);
+            Check(ls::FindInside(acc, f) == 0, "a frame at the top of the image reads as zero");
+        }
+        {
+            auto f = Sigs(Frame(doc, kW, 700, kH), kW);
+            Check(ls::FindInside(acc, f) == 300, "a frame at the bottom of the image is found");
+        }
+        {
+            auto f = Sigs(Frame(doc, kW, 1000, kH), kW);
+            Check(ls::FindInside(acc, f) < 0, "content below the image is not inside it");
+        }
+        {
+            auto f = Sigs(Frame(doc, kW, 100, kH), kW);
+            Check(ls::FindInside(acc, f) < 0, "content above the image is not inside it");
+        }
+        {
+            auto raw = Frame(doc, kW, 500, kH);
+            for (int r = 120; r < 130; ++r)
+                for (int x = 0; x < kW; ++x) raw[(size_t)r * kW + x] = 0xFF202020u;
+            Check(ls::FindInside(acc, Sigs(raw, kW)) == 100,
+                  "a disturbed band still finds the frame inside");
+        }
+        {
+            Check(ls::FindInside(acc, Sigs(Frame(doc, kW, 400, (int)acc.size()), kW)) == 0,
+                  "a frame as tall as the image sits at zero");
+            Check(ls::FindInside(acc, Sigs(Frame(doc, kW, 400, (int)acc.size() + kH), kW)) < 0,
+                  "a frame taller than the image is nowhere inside it");
+        }
+        {
+            // On a page that repeats every 20 rows a frame matches at several
+            // offsets at once; any offset the frame really agrees with is a good
+            // answer, since all that is being asked is "already stitched?".
+            MakeDoc(doc, kW, 2000, 20);
+            const auto rep = Sigs(doc, kW);
+            const std::vector<uint64_t> acc2(rep.begin() + 400, rep.begin() + 1000);
+            const auto f = Sigs(Frame(doc, kW, 437, kH), kW);
+            const int o = ls::FindInside(acc2, f);
+            bool agrees = o >= 0 && o + kH <= (int)acc2.size();
+            for (int j = 0; agrees && j < kH; ++j)
+                agrees = acc2[(size_t)(o + j)] == f[(size_t)j];
+            Check(agrees, "a repeating page is found at an offset it really agrees with");
+        }
+    }
+    {
         MakeDoc(doc, kW, 1200, 0);
         const auto one = Sigs(Frame(doc, kW, 5, 1), kW);
         const auto other = Sigs(Frame(doc, kW, 6, 1), kW);

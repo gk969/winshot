@@ -31,7 +31,7 @@ function Force-Foreground([IntPtr]$h) {
 }
 
 # 96dpi display: the app's logical sizes are its physical sizes.
-$BOXW = 117; $BOXH = 85; $INFOH = 62; $SCALE = 5
+$BOXW = 117; $BOXH = 85; $INFOH = 62; $SCALE = 5; $GAP = 30
 $CARDH = $BOXH + $INFOH - 1
 
 function Grab([string]$path) {
@@ -91,13 +91,15 @@ function InkCount($bmp, [int]$x0, [int]$y0, [int]$x1, [int]$y1) {
     }
     return $n
 }
-# CardRect, mirrored from the app: centred on the cursor, clamped to the screen.
+# loupe::CardRect, mirrored from the app: below-right of the cursor by $GAP so
+# the card never covers the pixel it is reading, stepping to the right and then
+# above only where that corner would run off the screen.
 function Card([int]$x, [int]$y) {
-    $l = $x - [int]($BOXW / 2); $t = $y - [int]($BOXH / 2)
-    if ($l -lt 0) { $l = 0 }
-    if ($l + $BOXW -gt $scrW) { $l = $scrW - $BOXW }
-    if ($t -lt 0) { $t = 0 }
-    if ($t + $CARDH -gt $scrH) { $t = $scrH - $CARDH }
+    $l = $x + $GAP; $t = $y + $GAP
+    if ($t + $CARDH -gt $scrH) { $t = $y - [int]($CARDH / 2) }
+    if ($l + $BOXW -gt $scrW) { $l = $x - [int]($BOXW / 2); $t = $y - $GAP - $CARDH }
+    $l = [Math]::Max(0, [Math]::Min($l, $scrW - $BOXW))
+    $t = [Math]::Max(0, [Math]::Min($t, $scrH - $CARDH))
     return @($l, $t)
 }
 function VisibleBars($overlay) {
@@ -242,21 +244,28 @@ if ($spread -ge 8) { $fail += 'field block not upscaled uniformly' }
 $cross = CrossCount $s1 $fx $fy ($fx + $fw - 1) ($fy + $fh - 1)
 "crosshair px in field: $cross (want > 300)"
 if ($cross -lt 300) { $fail += 'no crosshair in the field' }
-# The crosshair has to sit on the cursor, not on the field's centre alone: the
-# two agree only while the centring chain is right.
+# The crosshair has to sit on the sampled pixel, not on the field's centre by
+# coincidence. The card no longer covers the cursor, so the two are different
+# points: the crosshair belongs at the centre of the source window, which is
+# centred on the cursor, while the cursor itself sits $GAP up and left of the
+# card entirely.
+# Floor, not [int]: the app divides the field by the scale in integers, and
+# [int] rounds a .5 half-source-window up, which lands the crosshair a block off.
+$ccx = $fx + [int][Math]::Floor($fw / $SCALE / 2) * $SCALE + [int]($SCALE / 2)
+$ccy = $fy + [int][Math]::Floor($fh / $SCALE / 2) * $SCALE + [int]($SCALE / 2)
 $bad = 0
 for ($yy = $fy + 10; $yy -lt $fy + $fh - 10; $yy += 7) {
     $hit = $false
-    for ($xx = $X - 3; $xx -le $X + 3; $xx++) { if (IsCross ($s1.GetPixel($xx, $yy))) { $hit = $true; break } }
+    for ($xx = $ccx - 3; $xx -le $ccx + 3; $xx++) { if (IsCross ($s1.GetPixel($xx, $yy))) { $hit = $true; break } }
     if (-not $hit) { $bad++ }
 }
 for ($xx = $fx + 10; $xx -lt $fx + $fw - 10; $xx += 7) {
     $hit = $false
-    for ($yy = $Y - 3; $yy -le $Y + 3; $yy++) { if (IsCross ($s1.GetPixel($xx, $yy))) { $hit = $true; break } }
+    for ($yy = $ccy - 3; $yy -le $ccy + 3; $yy++) { if (IsCross ($s1.GetPixel($xx, $yy))) { $hit = $true; break } }
     if (-not $hit) { $bad++ }
 }
-"crosshair off-cursor rows/cols: $bad (want 0)"
-if ($bad -gt 0) { $fail += "crosshair not on the cursor ($bad)" }
+"crosshair off-centre rows/cols: $bad (want 0), at $ccx,$ccy"
+if ($bad -gt 0) { $fail += "crosshair not on the sampled pixel ($bad)" }
 
 $backPts = @( @(($L + 2), ($iy + 59)), @(($L + $BOXW - 3), ($iy + 30)), @(($L + 2), ($iy + 2)) )
 foreach ($p in $backPts) {
@@ -272,26 +281,14 @@ if ($ink -lt 150) { $fail += 'readout has no text' }
 [void](Crop $s1 ($L - 6) ($T - 6) ($BOXW + 12) ($CARDH + 12) 'D:\Project\winshot\obj\s6_loupe.png')
 [void](Crop $before ($X - 40) ($Y - 40) 80 80 'D:\Project\winshot\obj\s6_source.png')
 
-# --- 按c复制色号 ------------------------------------------------------------
-# The key only reaches the overlay while it is the foreground window, and the
-# sentinel rules out a leftover clipboard from whichever test ran last.
-$want = 'RGB:({0},{1},{2})' -f $src.R, $src.G, $src.B
-[System.Windows.Forms.Clipboard]::SetText('sentinel')
-Force-Foreground $ov[0]
-Start-Sleep -Milliseconds 300
-"foreground is overlay: $([W6L]::GetForegroundWindow() -eq $ov[0])"
-$got = ''
-for ($try = 0; $try -lt 3; $try++) {
-    [void][System.Windows.Forms.SendKeys]::SendWait('c')
-    Start-Sleep -Milliseconds 400
-    try { $got = [System.Windows.Forms.Clipboard]::GetText() } catch { $got = '' }
-    if ($got -eq $want) { break }
+# --- the card stays clear of the cursor ------------------------------------
+# The whole point of the offset: the card reads the pixel under the pointer, so
+# it may not sit on top of it.
+if ($L -le $X -or $T -le $Y) {
+    $fail += "card at $L,$T does not sit below-right of the cursor at $X,$Y"
 }
-"clipboard: '$got' (want '$want')"
-if ($got -notmatch '^RGB:\(\d{1,3},\d{1,3},\d{1,3}\)$') {
-    $fail += "c did not copy a colour (got '$got')"
-} elseif ($got -ne $want -and $staticDesk) {
-    $fail += "c copied the wrong colour (got '$got', want '$want')"
+if ($L - $X -lt $GAP - 2 -or $T - $Y -lt $GAP - 2) {
+    $fail += "card at $L,$T is not $GAP px clear of the cursor at $X,$Y"
 }
 
 # --- the magnifier gets out of the way -------------------------------------
@@ -319,11 +316,22 @@ $back = CrossCount $s3 $fx $fy ($fx + $fw - 1) ($fy + $fh - 1)
 if ($back -lt 300) { $fail += 'magnifier did not come back' }
 
 # --- and hides while a tool is armed ---------------------------------------
-$rx = $bar.left + 4 + 13; $ry = [int](($bar.top + $bar.bottom) / 2)
-for ($try = 0; $try -lt 3; $try++) {
-    Click $rx $ry
-    if (@(VisibleBars $ov[0]).Count -ge 2) { break }
+# Arming the tool grows the bar downward, and near the screen's bottom edge that
+# is what decides where the bar sits, so the toolbar moves. Every click here has
+# to re-read its position rather than reuse one taken before the tool was armed.
+function Toolbar-Of($overlay) {
+    $b = @(VisibleBars $overlay)
+    if ($b.Count -eq 0) { return $null }
+    # EnumChildWindows is recursive, so the widest one is the toolbar itself.
+    return @($b | Sort-Object { ($_.right - $_.left) } -Descending)[0]
 }
+function Click-RectTool($overlay) {
+    $t = Toolbar-Of $overlay
+    if (-not $t) { return }
+    Click ($t.left + 4 + 13) ([int](($t.top + $t.bottom) / 2))
+}
+Click-RectTool $ov[0]
+Start-Sleep -Milliseconds 300
 $armed = @(VisibleBars $ov[0]).Count -ge 2
 "tool armed (property bar up): $armed"
 if (-not $armed) { $fail += 'could not arm the rect tool' }
@@ -335,6 +343,55 @@ else {
     "crosshair px with a tool armed: $withTool (want 0)"
     if ($withTool -gt 20) { $fail += 'magnifier drawn while a tool is armed' }
 }
+
+# 按c only copies while the magnifier is up, so the tool has to go back to sleep
+# before the key means anything. Clicking the active tool again drops it.
+Click-RectTool $ov[0]
+Start-Sleep -Milliseconds 300
+$disarmed = @(VisibleBars $ov[0]).Count -lt 2
+"tool disarmed: $disarmed"
+if (-not $disarmed) { $fail += 'could not disarm the rect tool' }
+
+# --- 按c复制色号, and that is the whole capture ----------------------------
+# Last, because copying the colour is the whole request: the capture ends there
+# rather than waiting for a region that was never going to be picked. The key
+# only reaches the overlay while it is the foreground window, and the sentinel
+# rules out a leftover clipboard from whichever test ran last.
+$want = '{0},{1},{2}' -f $src.R, $src.G, $src.B
+# Back over the desktop: over the toolbar there is no magnifier, so no sampled
+# pixel and nothing for the key to copy.
+MoveTo $X $Y
+Start-Sleep -Milliseconds 400
+[System.Windows.Forms.Clipboard]::SetText('sentinel')
+Force-Foreground $ov[0]
+Start-Sleep -Milliseconds 300
+"foreground is overlay: $([W6L]::GetForegroundWindow() -eq $ov[0])"
+$got = ''
+for ($try = 0; $try -lt 3; $try++) {
+    [void][System.Windows.Forms.SendKeys]::SendWait('c')
+    Start-Sleep -Milliseconds 400
+    try { $got = [System.Windows.Forms.Clipboard]::GetText() } catch { $got = '' }
+    if ($got -eq $want) { break }
+}
+"clipboard: '$got' (want '$want')"
+if ($got -notmatch '^\d{1,3},\d{1,3},\d{1,3}$') {
+    $fail += "c did not copy a bare rgb triple (got '$got')"
+} elseif ($got -ne $want -and $staticDesk) {
+    $fail += "c copied the wrong colour (got '$got', want '$want')"
+}
+
+Start-Sleep -Milliseconds 600
+$stillUp = New-Object System.Collections.ArrayList
+$cb3 = [W6L+EnumProc] {
+    param($h, $l)
+    $t = New-Object System.Text.StringBuilder 256
+    [void][W6L]::GetWindowText($h, $t, 256)
+    if ($t.ToString() -eq 'WinShotOverlay') { [void]$stillUp.Add($h) }
+    return $true
+}
+[void][W6L]::EnumWindows($cb3, [IntPtr]::Zero)
+"overlay windows after c: $($stillUp.Count) (want 0)"
+if ($stillUp.Count -gt 0) { $fail += 'c left the capture up' }
 
 if ($fail.Count) { "FAIL: " + ($fail -join '; '); exit 1 }
 "PASS"

@@ -5,6 +5,7 @@
 #include "PropertyBarWnd.h"
 
 class CaptureSession;
+class CTipCardWnd;
 namespace annot { class Annotation; class ShapeText; }
 
 // A 32bpp DIB section with a GDI+ face over it: GDI+ draws into it and BitBlt
@@ -26,6 +27,9 @@ struct DibCanvas {
 class COverlayWnd : public CWnd {
 public:
     BOOL Create(CaptureSession* session);
+    // Both out of line: the hover card is only forward-declared here, and the
+    // pair of them is what unique_ptr needs to see a complete type for.
+    COverlayWnd();
     ~COverlayWnd();
 
     CToolbarWnd& Toolbar() { return m_toolbar; }
@@ -61,9 +65,9 @@ public:
     void CursorMoved();
     // A tooltip card appearing, moving, or being withdrawn; `anchor` is the new
     // card's anchor in client coordinates, null when it is only going away. The
-    // card it replaces and the box the new one can land in are what get
-    // repainted — the whole client on every button the pointer crosses is what
-    // made the frame and the dim flash together.
+    // card is a top-level popup rather than something painted here: a child
+    // window always draws above its parent's client area, so the card could
+    // never cover the property bar from inside this window.
     void TipChanged(const CPoint* anchor);
 
 protected:
@@ -72,6 +76,10 @@ protected:
     afx_msg void OnLButtonDown(UINT nFlags, CPoint pt);
     afx_msg void OnLButtonDblClk(UINT nFlags, CPoint pt);
     afx_msg void OnLButtonUp(UINT nFlags, CPoint pt);
+    afx_msg void OnRButtonDown(UINT nFlags, CPoint pt);
+    afx_msg void OnRButtonUp(UINT nFlags, CPoint pt);
+    afx_msg void OnRButtonDblClk(UINT nFlags, CPoint pt);
+    afx_msg void OnContextMenu(CWnd* wnd, CPoint pt);
     afx_msg void OnMouseMove(UINT nFlags, CPoint pt);
     afx_msg BOOL OnMouseWheel(UINT nFlags, short zDelta, CPoint pt);
     afx_msg BOOL OnSetCursor(CWnd* pWnd, UINT nHitTest, UINT message);
@@ -86,7 +94,17 @@ protected:
     DECLARE_MESSAGE_MAP()
 
 private:
-    enum class Mode { Idle, Creating, Moving, Sizing, Drawing, MoveAnno, DragHandle };
+    enum class Mode {
+        Idle,
+        Creating,
+        Moving,
+        Sizing,
+        Drawing,
+        MoveAnno,
+        DragHandle,
+        // The 编辑 frame's scrollbar thumb, held down.
+        ScrollThumb,
+    };
 
     // The bottom of the frame: the still with the committed annotations
     // composited over it. It deliberately ignores the selection, so dragging the
@@ -98,12 +116,19 @@ private:
     void DrawDim(const DibCanvas& out, const CRect& lim);
     void DrawSelectionFrame(Gdiplus::Graphics& g);
     void DrawSizeLabel(Gdiplus::Graphics& g);
-    void DrawTip(Gdiplus::Graphics& g);
     void DrawEditFrame(Gdiplus::Graphics& g);
     void DrawFontDropdown(Gdiplus::Graphics& g);
     void DrawLoupe(Gdiplus::Graphics& g);
     // The ^ that folds the stitched preview away, hung off the size card.
     void DrawLongShotCaret(Gdiplus::Graphics& g, const CRect& card);
+    // The 编辑 frame's scrollbar, inside its right edge.
+    void DrawScrollBar(Gdiplus::Graphics& g);
+    // False when there is no scrollbar to draw. `track` is the strip the thumb
+    // travels in, `thumb` where it sits at the current scroll.
+    bool ThumbRect(CRect* track, CRect* thumb) const;
+    // Scrolls the 编辑 page so the thumb's top reaches `pt.y`, less the offset
+    // the press landed on it.
+    void ScrollToThumb(CPoint pt);
     // Cursor position in client coords when the magnifier belongs on screen.
     bool LoupeCursor(CPoint* at) const;
     // Row of the open 字号 list under `pt`, or -1.
@@ -158,10 +183,11 @@ private:
     DibCanvas m_out;
     // Where the magnifier was painted last, so the next move knows what to clear.
     CRect m_loupeRect{};
-    // The same for the tooltip card.
-    CRect m_tipRect{};
+    // The hover card. A top-level popup rather than something drawn here, so it
+    // can cover the bars; made on the first hover, gone with this window.
+    std::unique_ptr<CTipCardWnd> m_tipWnd;
     // Fonts and the size card's measurement, rebuilt on every paint otherwise.
-    std::unique_ptr<Gdiplus::Font> m_labelFont, m_tipFont, m_dropFont, m_loupeFont;
+    std::unique_ptr<Gdiplus::Font> m_labelFont, m_dropFont, m_loupeFont;
     CString m_labelText;
     CSize m_labelSize = { 0, 0 };
     // Empty unless 长截图 has the hole open. Client coordinates.
@@ -182,6 +208,8 @@ private:
     CPoint m_dragStart = { 0, 0 };
     RECT m_startRect = {};
     RECT m_prevRect = {};
+    // For a thumb drag: how far below the thumb's top the press landed.
+    int m_thumbGrab = 0;
 
     // Shape being dragged out with a tool active; committed on button up.
     std::unique_ptr<annot::Annotation> m_pending;

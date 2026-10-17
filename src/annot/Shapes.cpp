@@ -259,10 +259,16 @@ std::unique_ptr<Annotation> ShapeMosaic::Clone() const {
 // -------------------------------------------------------------------- arrows
 
 namespace {
-// The head has a floor well above the thinnest pen: scaled only from the stroke
-// it is a speck at the end of a long shaft, which is what made the old one read
-// as a line with no head at all.
-Gdiplus::REAL HeadLenFor(Gdiplus::REAL pen) { return std::max(24.0f, pen * 4.0f); }
+// The head is sized from the width the property bar offers (2, 4 and 8 px)
+// rather than scaled off the stroke: scaled off the stroke it is a speck at the
+// end of a long shaft, which is what made the old one read as a line with no
+// head at all. The widest setting keeps the reference size and the two thinner
+// ones are two thirds and a half of it, so the three read as three different
+// triangles instead of one floor reached three ways.
+Gdiplus::REAL HeadLenFor(Gdiplus::REAL pen) {
+    if (pen >= 6.0f) return 32.0f;
+    return pen >= 3.0f ? 32.0f * 2.0f / 3.0f : 16.0f;
+}
 }  // namespace
 
 Gdiplus::REAL ShapeArrow::HeadLen() const { return HeadLenFor(m_pen); }

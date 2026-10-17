@@ -25,6 +25,10 @@ public:
 
     SelHandle HitTest(POINT pt, int radius) const;
     bool Contains(POINT pt) const;
+    // Within `band` pixels of the frame line, on either side of it. The corners
+    // and edge midpoints answer through HitTest first; what is left along the
+    // frame is where a press moves the whole region.
+    bool NearFrame(POINT pt, int band) const;
 
     void BeginCreate(POINT anchor);
     void UpdateCreate(POINT pt);

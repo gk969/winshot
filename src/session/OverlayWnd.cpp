@@ -11,6 +11,7 @@
 #include "AppMessages.h"
 
 #include <emmintrin.h>
+#include <share.h>
 
 namespace {
 
@@ -25,6 +26,94 @@ bool SameBox(const Gdiplus::RectF& a, const Gdiplus::RectF& b) {
     return a.X == b.X && a.Y == b.Y && a.Width == b.Width && a.Height == b.Height;
 }
 
+// Inclusive, unlike CRect::PtInRect, which drops the bottom and right edges —
+// and the frame's own edge is as far as a drag is allowed to reach.
+bool InRegion(const RECT& s, CPoint pt) {
+    return pt.x >= s.left && pt.x <= s.right && pt.y >= s.top && pt.y <= s.bottom;
+}
+
+// A box that lies wholly inside the region, edges touching allowed.
+bool InRegion(const RECT& s, const Gdiplus::RectF& b) {
+    return b.X >= s.left && b.Y >= s.top && b.X + b.Width <= s.right &&
+           b.Y + b.Height <= s.bottom;
+}
+
+// The crosshair a drawing tool shows inside the region: a plain cross with a
+// small square at its centre and no arrowheads, so it reads as "press and drag
+// to start a shape" rather than as a pointer. IDC_CROSS has no centre square,
+// and the region behind it is dimmed to near black, so the figure is white with
+// a dark rim to survive a light ground as well as a dark one.
+HCURSOR CrossCursor() {
+    static const HCURSOR cursor = [] {
+        // 32px is the cursor canvas at 100%; the system does not scale a cursor
+        // an app made itself, and the figure is symmetric about both axes so the
+        // mask's row order cannot show through.
+        constexpr int k = 32;
+        constexpr int c = 15;
+        bool on[k][k]{};
+        for (int i = 0; i < k; ++i) {
+            on[c][i] = on[c + 1][i] = true;
+            on[i][c] = on[i][c + 1] = true;
+        }
+        for (int j = c - 3; j <= c + 4; ++j)
+            for (int i = c - 3; i <= c + 4; ++i)
+                if (j == c - 3 || j == c + 4 || i == c - 3 || i == c + 4)
+                    on[j][i] = true;
+
+        unsigned char xorBits[k * k * 4]{};
+        unsigned char andBits[k * 4]{};  // a set bit is transparent
+        for (int row = 0; row < k; ++row) {
+            for (int col = 0; col < k; ++col) {
+                const bool ink = on[row][col];
+                const bool rim = !ink && ((row > 0 && on[row - 1][col]) ||
+                                          (row + 1 < k && on[row + 1][col]) ||
+                                          (col > 0 && on[row][col - 1]) ||
+                                          (col + 1 < k && on[row][col + 1]));
+                unsigned char* px = &xorBits[(row * k + col) * 4];
+                if (ink) {
+                    px[0] = px[1] = px[2] = 0xFF;
+                    px[3] = 0xFF;
+                } else if (rim) {
+                    px[3] = 0xFF;
+                } else {
+                    andBits[row * 4 + col / 8] |= (unsigned char)(0x80 >> col % 8);
+                }
+            }
+        }
+
+        BITMAPINFO bi{};
+        bi.bmiHeader.biSize = sizeof(bi.bmiHeader);
+        bi.bmiHeader.biWidth = k;
+        bi.bmiHeader.biHeight = -k;  // top-down, so row 0 is the top row
+        bi.bmiHeader.biPlanes = 1;
+        bi.bmiHeader.biBitCount = 32;
+        bi.bmiHeader.biCompression = BI_RGB;
+        void* bits = nullptr;
+        HDC screen = ::GetDC(nullptr);
+        HBITMAP color =
+            ::CreateDIBSection(screen, &bi, DIB_RGB_COLORS, &bits, nullptr, 0);
+        ::ReleaseDC(nullptr, screen);
+        HBITMAP mask = ::CreateBitmap(k, k, 1, 1, andBits);
+        if (!color || !bits || !mask) {
+            if (color) ::DeleteObject(color);
+            if (mask) ::DeleteObject(mask);
+            return (HCURSOR)nullptr;
+        }
+        memcpy(bits, xorBits, sizeof(xorBits));
+        ICONINFO ii{};
+        ii.fIcon = FALSE;
+        ii.xHotspot = c + 1;
+        ii.yHotspot = c + 1;
+        ii.hbmColor = color;
+        ii.hbmMask = mask;
+        HCURSOR made = (HCURSOR)::CreateIconIndirect(&ii);
+        ::DeleteObject(color);
+        ::DeleteObject(mask);
+        return made;
+    }();
+    return cursor;
+}
+
 const Gdiplus::Color kFrame(0xFF1E9FD4);
 const Gdiplus::Color kDim(0x99000000);
 const Gdiplus::Color kLabelBack(0xE0232323);
@@ -32,6 +121,11 @@ const Gdiplus::Color kLabelText(0xFFFFFFFF);
 const Gdiplus::Color kCaretInk(0xFF232323);
 const Gdiplus::Color kTipBack(0xFFFFFFFF);
 const Gdiplus::Color kTipText(0xFF1F2328);
+const Gdiplus::Color kTipEdge(0xFFC9CCD1);
+// The 编辑 frame's scrollbar, over the page rather than beside it, as in
+// 参考UI图/编辑长图.png.
+const Gdiplus::Color kTrackBack(0x40FFFFFF);
+const Gdiplus::Color kThumb(0xFF9AA0A6);
 // 文字-点击位置-输入时红色文本框.png strokes the live edit in the annotation
 // red whatever the chosen ink is.
 const Gdiplus::Color kEditFrame(0xFFF73840);
@@ -41,12 +135,145 @@ const wchar_t kFontFace[] = L"Microsoft YaHei UI";
 
 }  // namespace
 
+// ------------------------------------------------------------- the hover card
+//
+// 工具栏-矩形-提示.png: a white card hanging under the slot the pointer rests
+// on. It has to cover the 粗细/颜色 bar, which opens directly below the toolbar,
+// and a child window always paints above its parent's client area — so the card
+// cannot be painted by the overlay at all, however it is positioned. It is its
+// own top-level popup, in front of the overlay, as the 长截图 prompt card is.
+class CTipCardWnd : public CWnd {
+public:
+    bool Create();
+    // Screen coordinates: where the card's top edge centre goes, and the box it
+    // has to stay inside.
+    void Show(const CString& text, CPoint anchor, const CRect& limit);
+    void Hide();
+
+protected:
+    afx_msg void OnPaint();
+    afx_msg BOOL OnEraseBkgnd(CDC* dc);
+    void PostNcDestroy() override {}
+    DECLARE_MESSAGE_MAP()
+
+private:
+    CString m_text;
+    std::unique_ptr<Gdiplus::Font> m_font;
+};
+
+BEGIN_MESSAGE_MAP(CTipCardWnd, CWnd)
+    ON_WM_PAINT()
+    ON_WM_ERASEBKGND()
+END_MESSAGE_MAP()
+
+bool CTipCardWnd::Create() {
+    LPCTSTR cls = AfxRegisterWndClass(0, nullptr, nullptr, nullptr);
+    if (!cls) return false;
+
+    // TOPMOST to outrank the topmost overlay, NOACTIVATE so the card never takes
+    // the keyboard from it. TRANSPARENT is what lets the click a tip is
+    // describing reach the slot underneath — but only alongside LAYERED, which
+    // is also what makes DWM composite a window that has no owner to draw it.
+    if (!CreateEx(WS_EX_TOPMOST | WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW |
+                  WS_EX_TRANSPARENT | WS_EX_LAYERED,
+                  cls, L"WinShotTipCard", WS_POPUP, 0, 0, 0, 0, nullptr, nullptr))
+        return false;
+    // A layered window shows nothing at all until it is given a layer: opaque
+    // here, since the card paints its own paper and the click passes through on
+    // the extended style rather than on a colour key.
+    ::SetLayeredWindowAttributes(GetSafeHwnd(), 0, 255, LWA_ALPHA);
+
+    Gdiplus::FontFamily family(kFontFace);
+    m_font = std::make_unique<Gdiplus::Font>(
+        &family, (Gdiplus::REAL)Dpi::S(GetSafeHwnd(), 12),
+        Gdiplus::FontStyleRegular, Gdiplus::UnitPixel);
+    return true;
+}
+
+void CTipCardWnd::Show(const CString& text, CPoint anchor, const CRect& limit) {
+    m_text = text;
+
+    // The window has to be the card's exact size before it paints, so the text
+    // is measured here rather than left to OnPaint.
+    Gdiplus::Bitmap probe(1, 1, PixelFormat32bppARGB);
+    Gdiplus::Graphics m(&probe);
+    m.SetTextRenderingHint(Gdiplus::TextRenderingHintAntiAliasGridFit);
+    Gdiplus::RectF box;
+    m.MeasureString(text.GetString(), text.GetLength(), m_font.get(),
+                    Gdiplus::PointF(0, 0), &box);
+    const int padX = Dpi::S(GetSafeHwnd(), 5), padY = Dpi::S(GetSafeHwnd(), 3);
+    const int w = (int)std::ceil(box.Width) + padX * 2;
+    const int h = (int)std::ceil(box.Height) + padY * 2;
+
+    int x = anchor.x - w / 2;
+    int y = anchor.y;
+    if (x + w > limit.right) x = limit.right - w;
+    if (x < limit.left) x = limit.left;
+    // The card hangs below its anchor, which is what puts it over the property
+    // bar. Only the bottom edge of the screen can push it up, and then it goes
+    // above the anchor as it always has.
+    if (y + h > limit.bottom) y = anchor.y - h - Dpi::S(GetSafeHwnd(), 8);
+    if (y < limit.top) y = limit.top;
+
+    MoveWindow(x, y, w, h, FALSE);
+    ShowWindow(SW_SHOWNA);
+    // A hover is answered with a paint straight away; waiting for the queue to
+    // drain would leave the card a frame or two behind the pointer.
+    InvalidateRect(nullptr, FALSE);
+    ::UpdateWindow(GetSafeHwnd());
+}
+
+void CTipCardWnd::Hide() {
+    if (GetSafeHwnd() && ::IsWindowVisible(GetSafeHwnd()))
+        ShowWindow(SW_HIDE);
+}
+
+void CTipCardWnd::OnPaint() {
+    CPaintDC dc(this);
+    CRect cl;
+    GetClientRect(&cl);
+    if (cl.Width() <= 0 || cl.Height() <= 0) return;
+
+    Gdiplus::Bitmap back(cl.Width(), cl.Height(), PixelFormat32bppARGB);
+    {
+        Gdiplus::Graphics g(&back);
+        g.SetTextRenderingHint(Gdiplus::TextRenderingHintAntiAliasGridFit);
+
+        const Gdiplus::RectF r(0.0f, 0.0f, (Gdiplus::REAL)cl.Width(),
+                               (Gdiplus::REAL)cl.Height());
+        Gdiplus::SolidBrush paper(kTipBack);
+        g.FillRectangle(&paper, r);
+        Gdiplus::Pen edge(kTipEdge, 1.0f);
+        g.DrawRectangle(&edge, 0.5f, 0.5f, (Gdiplus::REAL)cl.Width() - 1.0f,
+                        (Gdiplus::REAL)cl.Height() - 1.0f);
+
+        Gdiplus::SolidBrush ink(kTipText);
+        g.DrawString(m_text, -1, m_font.get(),
+                     Gdiplus::PointF((Gdiplus::REAL)Dpi::S(GetSafeHwnd(), 5),
+                                     (Gdiplus::REAL)Dpi::S(GetSafeHwnd(), 3)),
+                     &ink);
+    }
+    {
+        Gdiplus::Graphics g(dc.GetSafeHdc());
+        g.SetInterpolationMode(Gdiplus::InterpolationModeNearestNeighbor);
+        g.DrawImage(&back, 0, 0, cl.Width(), cl.Height());
+    }
+}
+
+BOOL CTipCardWnd::OnEraseBkgnd(CDC*) {
+    return TRUE;
+}
+
 BEGIN_MESSAGE_MAP(COverlayWnd, CWnd)
     ON_WM_PAINT()
     ON_WM_ERASEBKGND()
     ON_WM_LBUTTONDOWN()
     ON_WM_LBUTTONDBLCLK()
     ON_WM_LBUTTONUP()
+    ON_WM_RBUTTONDOWN()
+    ON_WM_RBUTTONUP()
+    ON_WM_RBUTTONDBLCLK()
+    ON_WM_CONTEXTMENU()
     ON_WM_MOUSEMOVE()
     ON_WM_MOUSEWHEEL()
     ON_WM_SETCURSOR()
@@ -86,7 +313,11 @@ BOOL COverlayWnd::Create(CaptureSession* session) {
     return TRUE;
 }
 
+COverlayWnd::COverlayWnd() = default;
+
 COverlayWnd::~COverlayWnd() {
+    // A top-level of its own, so nothing would take it down with this window.
+    m_tipWnd.reset();
     if (m_propbar.GetSafeHwnd()) m_propbar.DestroyWindow();
     if (m_toolbar.GetSafeHwnd()) m_toolbar.DestroyWindow();
     m_base.Free();
@@ -217,12 +448,11 @@ public:
     }
     ~PaintProbe() {
         if (!on) return;
-        static FILE* log = []() -> FILE* {
-            FILE* f = nullptr;
-            if (::fopen_s(&f, "D:\\Project\\winshot\\obj\\paint.log", "w") != 0)
-                return nullptr;
-            return f;
-        }();
+        // _SH_DENYNO: the default locks the file against readers, and a test that
+        // wants to know where in the log its own actions start has to be able to
+        // count the lines while the capture is still up.
+        static FILE* log = ::_fsopen(
+            "D:\\Project\\winshot\\obj\\paint.log", "w", _SH_DENYNO);
         if (!log) return;
         g_probeCur = nullptr;
         std::fprintf(log,
@@ -345,6 +575,24 @@ void COverlayWnd::DrawBase(Gdiplus::Graphics& g) {
     const POINT off = m_session->CapOff();
     g.SetInterpolationMode(Gdiplus::InterpolationModeNearestNeighbor);
     g.SetPixelOffsetMode(Gdiplus::PixelOffsetModeHalf);
+
+    Gdiplus::GraphicsState st = 0;
+    bool clipped = false;
+    if (m_session->LongShotEdit()) {
+        // The frame is a viewport, not a window: the page stops at its edges and
+        // what lies outside them is the desktop the page was made from, which is
+        // how 参考UI图/编辑长图.png reads.
+        if (Gdiplus::Bitmap* back = m_session->Backdrop()) {
+            const POINT bo = m_session->BackdropOff();
+            g.DrawImage(back, (int)bo.x, (int)bo.y, (int)back->GetWidth(),
+                        (int)back->GetHeight());
+        }
+        const CRect f = m_session->Sel().Rect();
+        st = g.Save();
+        g.SetClip(Gdiplus::Rect(f.left, f.top, f.Width(), f.Height()),
+                  Gdiplus::CombineModeIntersect);
+        clipped = true;
+    }
     g.DrawImage(cap.Image(), off.x, off.y, cap.Width(), cap.Height());
 
     // Half-pixel offsets are what make the 1:1 blit land exactly, but they shift
@@ -355,7 +603,10 @@ void COverlayWnd::DrawBase(Gdiplus::Graphics& g) {
     // Not clipped to the selection: the selection is what changes most often,
     // and tying the cache to it would rebuild the screen on every drag. Ink
     // outside the selection still gets dimmed below, and the export crops it.
+    // The 编辑 frame is the exception — it never moves, and the page has to stop
+    // at its edges.
     m_session->Annos().DrawAll(g, MovingAnno());
+    if (clipped) g.Restore(st);
 }
 
 // Each chrome element takes a clip of its own. The clip is also the rect its ink
@@ -499,16 +750,25 @@ void COverlayWnd::DrawChrome(Gdiplus::Graphics& g) {
     // selection area this window still paints. It has no rect of its own to
     // offer, so 长截图 keeps paying for the whole region.
     if (InLongShot()) {
-        CRect cl;
-        GetClientRect(&cl);
-        m_chromeInk.push_back(cl);
-        m_session->PaintLongShot(g);
+        // The preview's own box, not the whole client. Blending the whole client
+        // drags back every card the chrome buffer has ever held — the buffer is
+        // only cleared where a frame clips to it — and that is the trail of
+        // magnifiers and 提示 cards 长截图 left stacked beside the hole.
+        CRect pr = m_session->LongShotPreviewRect();
+        if (!pr.IsRectEmpty()) {
+            pr.InflateRect(2, 2);  // the ring is drawn outside the image
+            ClipTo clip(g, Gdiplus::RectF((Gdiplus::REAL)pr.left, (Gdiplus::REAL)pr.top,
+                                          (Gdiplus::REAL)pr.Width(),
+                                          (Gdiplus::REAL)pr.Height()),
+                        &m_chromeInk);
+            m_session->PaintLongShot(g);
+        }
     }
     DrawSizeLabel(g);
-    DrawTip(g);
     DrawEditFrame(g);
     DrawFontDropdown(g);
     ProbeMark(5);
+    DrawScrollBar(g);
     DrawLoupe(g);
     ProbeMark(6);
 }
@@ -724,6 +984,10 @@ void COverlayWnd::InvalidateLoupe() {
         const RECT card = loupe::CardRect(GetSafeHwnd(), at, cl);
         dirty.UnionRect(dirty, CRect(card.left, card.top, card.right, card.bottom));
     }
+    // Nothing was drawn and nothing is: inflating the empty rect would give a
+    // 2x2 at the client origin, which every selection drag would then carry as
+    // the corner of its update region's bounding rect.
+    if (dirty.IsRectEmpty()) return;
     dirty.InflateRect(2, 2);
     InvalidatePart(dirty);
 }
@@ -735,18 +999,27 @@ void COverlayWnd::CursorMoved() {
 }
 
 void COverlayWnd::TipChanged(const CPoint* anchor) {
-    // The card that was there has to be repainted over, and the new one has room
-    // to land either side of its anchor (it flips above when the bottom would
-    // cut it off). Its exact size needs the text measured, which is a paint-time
-    // job, so this is a box wide enough for any of the bar's tips instead.
-    CRect dirty = m_tipRect;
-    if (anchor) {
-        const int w = Dpi::S(GetSafeHwnd(), 440);
-        const int h = Dpi::S(GetSafeHwnd(), 90);
-        dirty.UnionRect(dirty, CRect(anchor->x - w / 2, anchor->y - h,
-                                     anchor->x + w / 2, anchor->y + h));
+    const CaptureSession::TipCard* tip = anchor ? m_session->Tip() : nullptr;
+    if (!tip) {
+        if (m_tipWnd) m_tipWnd->Hide();
+        return;
     }
-    if (!dirty.IsRectEmpty()) InvalidatePart(dirty);
+    // Made on the first hover rather than at Create: a top-level that exists all
+    // the time is one more window every probe of the screen has to step over.
+    if (!m_tipWnd) {
+        m_tipWnd = std::make_unique<CTipCardWnd>();
+        if (!m_tipWnd->Create()) {
+            m_tipWnd.reset();
+            return;
+        }
+    }
+
+    CPoint at = *anchor;
+    ::ClientToScreen(GetSafeHwnd(), &at);
+    CRect limit;
+    GetClientRect(&limit);
+    ::MapWindowRect(GetSafeHwnd(), HWND_DESKTOP, &limit);
+    m_tipWnd->Show(tip->text, at, limit);
 }
 
 // 文字-点击位置-输入时红色文本框.png: the live edit is a bare CEdit and the
@@ -870,6 +1143,10 @@ void COverlayWnd::DrawSelectionFrame(Gdiplus::Graphics& g) {
     g.DrawRectangle(&pen, (Gdiplus::REAL)s.left, (Gdiplus::REAL)s.top,
                     (Gdiplus::REAL)w, (Gdiplus::REAL)h);
 
+    // The 编辑 frame is a viewport, not a region: it is fixed, so the grips would
+    // promise a resize that cannot happen.
+    if (m_session->LongShotEdit()) return;
+
     POINT pts[8] = {
         { s.left, s.top },
         { (s.left + s.right) / 2, s.top },
@@ -965,56 +1242,49 @@ void COverlayWnd::DrawLongShotCaret(Gdiplus::Graphics& g, const CRect& card) {
     m_session->SetLongShotCaret(CRect(cx - hit, cy - hit, cx + hit, cy + hit));
 }
 
-void COverlayWnd::DrawTip(Gdiplus::Graphics& g) {
-    const CaptureSession::TipCard* tip = m_session->Tip();
-    if (!tip) {
-        m_tipRect.SetRectEmpty();
-        return;
-    }
+// 参考UI图/编辑长图.png: the page is taller than the frame that shows it, so a
+// light track with a grey thumb just inside the frame's right edge says how much
+// of the page is on screen and which part that is.
+bool COverlayWnd::ThumbRect(CRect* track, CRect* thumb) const {
+    if (!m_session->LongShotEdit()) return false;
+    const int maxScroll = m_session->LongShotMaxScroll();
+    if (maxScroll <= 0) return false;
 
-    if (!m_tipFont) m_tipFont = UiFont(Dpi::S(GetSafeHwnd(), 12));
-    if (!m_tipFont) {
-        m_tipRect.SetRectEmpty();
-        return;
-    }
-    g.SetTextRenderingHint(Gdiplus::TextRenderingHintAntiAliasGridFit);
+    const CRect f = m_session->Sel().Rect();
+    const HWND hwnd = GetSafeHwnd();
+    const int w = Dpi::S(hwnd, 8), pad = Dpi::S(hwnd, 3);
+    *track = CRect(f.right - w - pad, f.top, f.right - pad, f.bottom);
+    if (track->Width() <= 0 || track->Height() <= 0) return false;
 
-    Gdiplus::RectF m;
-    g.MeasureString(tip->text.GetString(), tip->text.GetLength(), m_tipFont.get(),
-                    Gdiplus::PointF(0, 0), &m);
+    // The thumb is the frame as a share of the page, floored so that a page much
+    // taller than the frame still leaves something to hold on to.
+    const int th = (std::max)(Dpi::S(hwnd, 30),
+                              MulDiv(f.Height(), f.Height(),
+                                     m_session->Capture().Height()));
+    const int travel = (std::max)(0, track->Height() - th);
+    const int y = track->top +
+                  MulDiv(travel, m_session->LongShotScroll(), maxScroll);
+    *thumb = CRect(track->left, y, track->right, y + th);
+    return true;
+}
 
-    const Gdiplus::REAL padX = (Gdiplus::REAL)Dpi::S(GetSafeHwnd(), 5);
-    const Gdiplus::REAL padY = (Gdiplus::REAL)Dpi::S(GetSafeHwnd(), 3);
-    const Gdiplus::REAL bw = m.Width + padX * 2;
-    const Gdiplus::REAL bh = m.Height + padY * 2;
+void COverlayWnd::DrawScrollBar(Gdiplus::Graphics& g) {
+    CRect track, thumb;
+    if (!ThumbRect(&track, &thumb)) return;
 
-    CRect cl;
-    GetClientRect(&cl);
-    Gdiplus::REAL bx = (Gdiplus::REAL)tip->anchor.x - bw / 2;
-    Gdiplus::REAL by = (Gdiplus::REAL)tip->anchor.y;
-    if (bx < cl.left) bx = (Gdiplus::REAL)cl.left;
-    if (bx + bw > cl.right) bx = (Gdiplus::REAL)cl.right - bw;
-    if (by + bh > cl.bottom)
-        by = (Gdiplus::REAL)tip->anchor.y - bh - Dpi::S(GetSafeHwnd(), 8);
-
-    // 工具栏-矩形-提示.png shows a borderless white card with a soft shadow
-    // falling down and to the right.
-    const Gdiplus::REAL so = (Gdiplus::REAL)Dpi::S(GetSafeHwnd(), 2);
-    const Gdiplus::RectF card(bx, by, bw + so, bh + so);
-    m_tipRect = CRect((int)std::floor(card.X), (int)std::floor(card.Y),
-                      (int)std::ceil(card.X + card.Width),
-                      (int)std::ceil(card.Y + card.Height));
-    ClipTo clip(g, card, &m_chromeInk);
-    Gdiplus::SolidBrush sh1(0x22000000);
-    g.FillRectangle(&sh1, bx + so / 2, by + so / 2, bw, bh);
-    Gdiplus::SolidBrush sh2(0x33000000);
-    g.FillRectangle(&sh2, bx + so, by + so, bw, bh);
-
-    Gdiplus::SolidBrush back(kTipBack);
-    g.FillRectangle(&back, bx, by, bw, bh);
-    Gdiplus::SolidBrush fg(kTipText);
-    g.DrawString(tip->text.GetString(), tip->text.GetLength(), m_tipFont.get(),
-                 Gdiplus::PointF(bx + padX, by + padY), &fg);
+    // Clipping to the track is also what clears the thumb's last position, so a
+    // scroll leaves no ghost behind it.
+    ClipTo clip(g, Gdiplus::RectF((Gdiplus::REAL)track.left,
+                                  (Gdiplus::REAL)track.top,
+                                  (Gdiplus::REAL)track.Width(),
+                                  (Gdiplus::REAL)track.Height()),
+                &m_chromeInk);
+    Gdiplus::SolidBrush back(kTrackBack);
+    g.FillRectangle(&back, (Gdiplus::REAL)track.left, (Gdiplus::REAL)track.top,
+                    (Gdiplus::REAL)track.Width(), (Gdiplus::REAL)track.Height());
+    Gdiplus::SolidBrush ink(kThumb);
+    g.FillRectangle(&ink, (Gdiplus::REAL)thumb.left, (Gdiplus::REAL)thumb.top,
+                    (Gdiplus::REAL)thumb.Width(), (Gdiplus::REAL)thumb.Height());
 }
 
 int COverlayWnd::HandleRadius() const {
@@ -1062,11 +1332,35 @@ bool COverlayWnd::ResolvePopup(CPoint pt) {
     return false;
 }
 
+// The 编辑 thumb follows the pointer, less whatever part of it the press landed
+// on. ScrollLongShot clamps the target itself, so only the difference is handed
+// over.
+void COverlayWnd::ScrollToThumb(CPoint pt) {
+    CRect track, thumb;
+    if (!ThumbRect(&track, &thumb)) return;
+    const int travel = track.Height() - thumb.Height();
+    if (travel <= 0) return;
+    const int y = std::clamp(pt.y - m_thumbGrab, track.top, track.top + travel);
+    m_session->ScrollLongShot(
+        MulDiv(m_session->LongShotMaxScroll(), y - track.top, travel) -
+        m_session->LongShotScroll());
+}
+
 void COverlayWnd::OnLButtonDown(UINT, CPoint pt) {
     // Presses inside the hole never reach us — that is the point of the hole.
     // What is left is the chrome, and the only thing on it is the caret.
     if (InLongShot()) {
         if (m_session->HitLongShotCaret(pt)) m_session->ToggleLongShotPreview();
+        return;
+    }
+    CRect track, thumb;
+    if (ThumbRect(&track, &thumb) && track.PtInRect(pt) != FALSE) {
+        ::SetCapture(GetSafeHwnd());
+        m_mode = Mode::ScrollThumb;
+        // How far into the thumb the press landed, so holding it there does not
+        // jump; anywhere else in the track the thumb's top comes to the pointer.
+        m_thumbGrab = pt.y - thumb.top;
+        ScrollToThumb(pt);
         return;
     }
     if (ResolvePopup(pt)) return;
@@ -1084,7 +1378,10 @@ void COverlayWnd::OnLButtonDown(UINT, CPoint pt) {
     m_annoIdx = m_annoHandle = -1;
     m_pending.reset();
 
-    SelHandle h = sel.HitTest(POINT{ pt.x, pt.y }, HandleRadius());
+    // The 编辑 frame cannot be sized, so its edges are not handles there.
+    SelHandle h = m_session->LongShotEdit()
+                      ? SelHandle::None
+                      : sel.HitTest(POINT{ pt.x, pt.y }, HandleRadius());
     if (h != SelHandle::None) {
         m_mode = Mode::Sizing;
         m_handle = h;
@@ -1134,6 +1431,9 @@ void COverlayWnd::OnLButtonDown(UINT, CPoint pt) {
                         &m_session->Mosaic()))) {
             m_mode = Mode::Drawing;
             m_session->Select(-1);
+        } else if (m_session->LongShotEdit()) {
+            // The frame is a viewport and it is fixed: a press that neither grabs
+            // ink nor arms a shape has nothing to do.
         } else if (!sel.IsDefault() && sel.Contains(POINT{ pt.x, pt.y })) {
             m_mode = Mode::Moving;
         } else {
@@ -1204,7 +1504,12 @@ void COverlayWnd::OnMouseMove(UINT, CPoint pt) {
         break;
     }
     case Mode::Drawing:
-        if (m_pending) {
+        // Past the frame the shape keeps the result of the last position inside:
+        // the box and the arrow recompute from a fixed start, so not being called
+        // holds them there, and the freehand tools append, so not being called
+        // stops sampling at the last point that was inside. Releasing outside
+        // commits what is there, which is what ends the drag.
+        if (m_pending && InRegion(sel.Rect(), pt)) {
             const CRect before = AnnoRect(m_pending.get());
             m_pending->UpdateDrag(
                 Gdiplus::PointF((Gdiplus::REAL)pt.x, (Gdiplus::REAL)pt.y),
@@ -1215,19 +1520,53 @@ void COverlayWnd::OnMouseMove(UINT, CPoint pt) {
     case Mode::MoveAnno:
         if (m_anno) {
             const CRect before = AnnoRect(m_anno);
-            m_anno->Translate((Gdiplus::REAL)(pt.x - m_dragStart.x),
-                              (Gdiplus::REAL)(pt.y - m_dragStart.y));
-            m_dragStart = pt;  // the next delta is relative to this move
+            // What falls outside the frame is not in the export, so an element
+            // dragged past it reads as having vanished. Each axis stops at the
+            // frame on its own and starts again from there when the pointer comes
+            // back, so dragging off the bottom-right corner parks the element in
+            // the corner rather than stopping it short of both edges. A shape
+            // wider or taller than the frame cannot move on that axis at all.
+            const RECT s = sel.Rect();
+            const Gdiplus::RectF bb = m_anno->InkBBox();
+            const Gdiplus::REAL dx = (Gdiplus::REAL)(pt.x - m_dragStart.x);
+            const Gdiplus::REAL dy = (Gdiplus::REAL)(pt.y - m_dragStart.y);
+            const Gdiplus::REAL ax =
+                InRegion(s, Gdiplus::RectF(bb.X + dx, bb.Y, bb.Width, bb.Height))
+                    ? dx : 0;
+            const Gdiplus::REAL ay =
+                InRegion(s, Gdiplus::RectF(bb.X, bb.Y + dy, bb.Width, bb.Height))
+                    ? dy : 0;
+            if (ax != 0 || ay != 0) m_anno->Translate(ax, ay);
+            // Only the part that landed counts as the pointer's position; the
+            // rest of the excursion is forgotten, as the request asks.
+            m_dragStart.x += (LONG)ax;
+            m_dragStart.y += (LONG)ay;
             InvalidateAnnoChange(m_anno, before);
         }
         break;
     case Mode::DragHandle:
         if (m_anno) {
             const CRect before = AnnoRect(m_anno);
-            m_anno->MoveHandle(m_annoHandle,
-                               Gdiplus::PointF((Gdiplus::REAL)pt.x, (Gdiplus::REAL)pt.y));
+            // The same limit on a resize, axis by axis: a corner dragged off the
+            // bottom-right of the frame ends up in the corner. MoveHandle cannot
+            // be undone, so each candidate goes onto a clone first and only one
+            // that keeps the ink inside the frame is applied to the real shape.
+            const RECT s = sel.Rect();
+            const Gdiplus::REAL x = (Gdiplus::REAL)pt.x, y = (Gdiplus::REAL)pt.y;
+            for (int pass = 0; pass < 2; ++pass) {
+                const Gdiplus::PointF at = m_anno->HandleAt(m_annoHandle);
+                const Gdiplus::PointF cand =
+                    pass ? Gdiplus::PointF(at.X, y) : Gdiplus::PointF(x, at.Y);
+                auto trial = m_anno->Clone();
+                trial->MoveHandle(m_annoHandle, cand);
+                if (InRegion(s, trial->InkBBox()))
+                    m_anno->MoveHandle(m_annoHandle, cand);
+            }
             InvalidateAnnoChange(m_anno, before);
         }
+        break;
+    case Mode::ScrollThumb:
+        ScrollToThumb(pt);
         break;
     case Mode::Idle:
         CursorMoved();
@@ -1273,9 +1612,45 @@ void COverlayWnd::OnLButtonUp(UINT, CPoint) {
     Invalidate();
 }
 
+// 鼠标右键自由截图, which is what the magnifier card promises. Before a region
+// has been picked the region is the whole screen, so a right click there takes
+// that, copies it and is done — the fastest way out for anyone who only wanted
+// the desktop. Once a region or some ink exists the click would throw work away,
+// so it is left inert.
+// The action is on the release, and every right-button message is swallowed
+// rather than passed to DefWindowProc. Accept ends the capture, and the overlay
+// used to be gone by the time the physical WM_RBUTTONUP arrived — the release
+// then reached the window underneath, and the desktop or the file browser opened
+// its own context menu under a hand that had just asked for a screenshot.
+void COverlayWnd::OnRButtonDown(UINT, CPoint) {}
+
+void COverlayWnd::OnRButtonUp(UINT, CPoint) {
+    if (InLongShot()) return;
+    if (m_session->Sel().IsDefault() && m_session->Annos().Count() == 0)
+        m_session->Accept();
+}
+
+void COverlayWnd::OnRButtonDblClk(UINT, CPoint) {}
+
+// With the release handled here, DefWindowProc never sees it and has no reason
+// to generate this; the keyboard route (Shift+F10) still does, and gets no menu
+// either.
+void COverlayWnd::OnContextMenu(CWnd*, CPoint) {}
+
 // Windows sends the wheel to the focus window, and in 长截图 that is us rather
 // than the window the hole is showing. Pass it on to whatever is underneath.
 BOOL COverlayWnd::OnMouseWheel(UINT nFlags, short zDelta, CPoint pt) {
+    // 长截图 编辑: the page is taller than the frame that shows it, and the
+    // wheel is how the rest of it is reached. Any pointer position counts — the
+    // overlay owns the wheel here and there is nothing else it could mean.
+    if (m_session->LongShotEdit()) {
+        // Rolling forward brings the top of the page down to the top of the
+        // frame, which is the opposite way to ScrollLongShot's rows: positive
+        // there means further down the document.
+        const int step = (zDelta / WHEEL_DELTA) * Dpi::S(GetSafeHwnd(), 100);
+        if (step) m_session->ScrollLongShot(-step);
+        return TRUE;
+    }
     if (!m_hole.IsRectEmpty()) {
         CPoint cl = pt;
         ScreenToClient(&cl);
@@ -1302,11 +1677,18 @@ BOOL COverlayWnd::OnSetCursor(CWnd*, UINT, UINT) {
     ::ScreenToClient(GetSafeHwnd(), &pt);
 
     const SelectionModel& sel = m_session->Sel();
-    SelHandle h = m_mode == Mode::Idle
-                      ? sel.HitTest(POINT{ pt.x, pt.y }, HandleRadius())
+    const POINT p{ pt.x, pt.y };
+    // The 编辑 frame has no edges to grab, so it offers no handles either.
+    SelHandle h = m_mode == Mode::Idle && !m_session->LongShotEdit()
+                      ? sel.HitTest(p, HandleRadius())
                       : m_handle;
 
-    LPCTSTR id = IDC_CROSS;
+    // Each shape says what a press here would do. The eight grips the frame draws
+    // resize it; ink moves the element under it; the frame away from a grip moves
+    // the whole region; the crosshair starts a shape inside the region; the arrow
+    // is everywhere a press would do nothing, which includes the two bars, whose
+    // own class cursors already are the arrow.
+    LPCTSTR id = nullptr;
     switch (h) {
     case SelHandle::TopLeft:
     case SelHandle::BottomRight: id = IDC_SIZENWSE; break;
@@ -1316,28 +1698,57 @@ BOOL COverlayWnd::OnSetCursor(CWnd*, UINT, UINT) {
     case SelHandle::Bottom:      id = IDC_SIZENS; break;
     case SelHandle::Left:
     case SelHandle::Right:       id = IDC_SIZEWE; break;
-    case SelHandle::None:
-        if (m_mode == Mode::Idle && !sel.IsDefault() &&
-            sel.Contains(POINT{ pt.x, pt.y }))
-            id = IDC_SIZEALL;
-        break;
     }
 
-    if (h == SelHandle::None && m_mode == Mode::Idle) {
+    // A selection handle has already claimed the pointer, so ink is only worth
+    // asking about where the crosshair or the arrow would otherwise sit.
+    if (!id && m_mode == Mode::Idle) {
         if (annot::Annotation* a = m_session->Selected()) {
             const int hi = HitAnnoHandle(*a, pt);
             if (hi >= 0) id = kBoxCursors[hi];
         }
         // The 画笔 and 马赛克 press is a stroke even on top of old ink, so the
-        // grab cursor would promise a move that does not happen.
+        // move cursor would promise a move that does not happen.
         const tb::Id tool = m_session->ActiveTool();
-        if (id == IDC_CROSS && tool != tb::Id::Pen && tool != tb::Id::Mosaic &&
+        if (!id && tool != tb::Id::Pen && tool != tb::Id::Mosaic &&
             m_session->Annos().TopAt(Gdiplus::PointF((Gdiplus::REAL)pt.x,
                                                      (Gdiplus::REAL)pt.y)))
             id = IDC_SIZEALL;
     }
 
-    ::SetCursor(::LoadCursor(nullptr, id));
+    if (!id) {
+        if (m_mode == Mode::Moving || m_mode == Mode::MoveAnno)
+            id = IDC_SIZEALL;
+        else if (m_mode == Mode::ScrollThumb)
+            id = IDC_ARROW;
+        else if (m_mode != Mode::Idle)
+            id = IDC_CROSS;
+        else if (m_session->ActiveTool() != tb::Id::None)
+            // A drawing tool is armed, so the crosshair is what the shape starts
+            // from. This is the one case the plain cross is right for.
+            id = sel.Contains(p) ? IDC_CROSS : IDC_ARROW;
+        // The 编辑 frame is a viewport that cannot be moved or resized, so away
+        // from the ink on it the pointer is only a pointer.
+        else if (m_session->LongShotEdit())
+            id = IDC_ARROW;
+        // Around the frame, away from its corners and edge midpoints, the whole
+        // region is what moves. That band reaches outside the frame too, where a
+        // press would otherwise do nothing; a region still covering the whole
+        // screen has nothing to move, so it keeps the arrow.
+        else if (!sel.IsDefault() && sel.NearFrame(p, Dpi::S(GetSafeHwnd(), 10)))
+            id = IDC_SIZEALL;
+        // With no tool armed a press anywhere inside a region the user picked
+        // moves that region, so the pointer says so across the whole of it and
+        // not only near the edge.
+        else if (!sel.IsDefault() && sel.Contains(p))
+            id = IDC_SIZEALL;
+        else
+            id = sel.Contains(p) ? IDC_CROSS : IDC_ARROW;
+    }
+
+    HCURSOR cursor = id == IDC_CROSS ? CrossCursor()
+                                     : ::LoadCursor(nullptr, id);
+    ::SetCursor(cursor ? cursor : ::LoadCursor(nullptr, IDC_ARROW));
     return TRUE;
 }
 
@@ -1367,9 +1778,25 @@ void COverlayWnd::OnKeyDown(UINT nChar, UINT nRepCnt, UINT nFlags) {
     // promises — with a tool armed there is no sampled pixel to copy.
     if (nChar == 'C') {
         CPoint at;
-        if (LoupeCursor(&at))
+        if (LoupeCursor(&at)) {
             loupe::CopyColor(m_session->Capture(), at, m_session->CapOff());
+            // The colour was the whole request; the capture ends here rather
+            // than waiting for a region that was never going to be picked.
+            m_session->Finish(false);
+        }
         return;
+    }
+
+    if (m_session->LongShotEdit()) {
+        // The frame cannot be nudged, so the arrows move the page through it —
+        // one notch, the same as one wheel click.
+        const int notch = Dpi::S(GetSafeHwnd(), 100);
+        switch (nChar) {
+        case VK_UP:
+        case VK_LEFT:  m_session->ScrollLongShot(-notch); return;
+        case VK_DOWN:
+        case VK_RIGHT: m_session->ScrollLongShot(notch); return;
+        }
     }
 
     int step = (::GetKeyState(VK_SHIFT) & 0x8000) ? 10 : 1;

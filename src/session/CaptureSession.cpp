@@ -118,14 +118,14 @@ void CaptureSession::Undo() {
 
 void CaptureSession::Accept() {
     std::unique_ptr<Gdiplus::Bitmap> bmp = out::RenderSelection(
-        *m_capture, m_sel->Rect(), m_annos, CapOff());
+        *m_capture, ExportRect(), m_annos, CapOff());
     if (bmp) out::SetClipboard(*bmp);
     Finish(true);
 }
 
 void CaptureSession::SavePng() {
     std::unique_ptr<Gdiplus::Bitmap> bmp =
-        out::RenderSelection(*m_capture, m_sel->Rect(), m_annos, CapOff());
+        out::RenderSelection(*m_capture, ExportRect(), m_annos, CapOff());
     if (!bmp) return;
 
     // The common dialog is not topmost, so the overlay has to step down for it.
@@ -135,14 +135,15 @@ void CaptureSession::SavePng() {
 }
 
 void CaptureSession::Pin() {
+    const CRect box = ExportRect();
     std::unique_ptr<Gdiplus::Bitmap> bmp =
-        out::RenderSelection(*m_capture, m_sel->Rect(), m_annos, CapOff());
+        out::RenderSelection(*m_capture, box, m_annos, CapOff());
     if (!bmp) return;
 
     // The selection lives in the overlay's client space, which starts at the
     // virtual screen's top-left; the pin window wants screen coordinates.
     const POINT org = m_overlay.Origin();
-    const RECT r = m_sel->Rect();
+    const RECT r = box;
     const CRect screen(r.left + org.x, r.top + org.y, r.right + org.x, r.bottom + org.y);
 
     theApp.AddPin(std::move(bmp), screen);
@@ -152,7 +153,7 @@ void CaptureSession::Pin() {
 void CaptureSession::StartOcr() {
     if (m_ocrBusy) return;
     std::unique_ptr<Gdiplus::Bitmap> bmp =
-        out::RenderSelection(*m_capture, m_sel->Rect(), m_annos, CapOff());
+        out::RenderSelection(*m_capture, ExportRect(), m_annos, CapOff());
     if (!bmp) return;
 
     // The overlay stays up: the user may keep working on the selection while
@@ -341,27 +342,96 @@ void CaptureSession::RunLongShotEdit() {
     m_longShot.reset();  // RunEdit has already closed the hole and the popups
 }
 
-void CaptureSession::EndLongShot(std::unique_ptr<Gdiplus::Bitmap> bmp, POINT anchor) {
+void CaptureSession::EndLongShot(std::unique_ptr<Gdiplus::Bitmap> bmp) {
     if (!bmp) return;
-    m_capture->Adopt(std::move(bmp), anchor);
+    // The screen outside the frame stays the screen, dimmed, as the reference
+    // shows it, so the still the document replaces is kept rather than dropped.
+    m_backdropOff = CapOff();
+    m_backdrop = m_capture->Detach();
+    // Any origin will do: the frame is placed below and SetOrigin puts the
+    // document exactly where that frame wants it.
+    m_capture->Adopt(std::move(bmp), m_overlay.Origin());
+    m_lsEdit = true;
+    m_lsScroll = 0;
 
-    // The stitched document starts at the hole's corner and runs past the
-    // bottom of the screen. The selection covers all of it — ✓ and 保存 have to
-    // keep the whole document — and the model's bounds widen to match, so what
-    // hangs below the screen is out of view rather than cut off.
-    const POINT off = CapOff();
-    m_sel->Reset(RECT{ off.x, off.y, off.x + m_capture->Width(),
-                       off.y + m_capture->Height() });
+    // The document outgrows the screen, so it cannot be shown whole. The
+    // selection becomes a frame over it: as wide as the document, as tall as the
+    // document when that fits, and otherwise 80% of the screen with the wheel
+    // moving it. Centred, because the frame is where the work happens and the
+    // toolbar hangs off its bottom edge.
+    CRect cl;
+    m_overlay.GetClientRect(&cl);
+    const int w = (std::min)(m_capture->Width(), cl.Width());
+    const int maxH = MulDiv(cl.Height(), 80, 100);
+    const int h = (std::min)((std::min)(m_capture->Height(), maxH), cl.Height());
+    CRect frame(0, 0, (std::max)(w, 1), (std::max)(h, 1));
+    frame.OffsetRect((cl.Width() - frame.Width()) / 2,
+                     (cl.Height() - frame.Height()) / 2);
+
+    m_capture->SetOrigin(POINT{ m_overlay.Origin().x + frame.left,
+                                m_overlay.Origin().y + frame.top });
+    // The frame is a viewport, not a selection: it is fixed here, and the wheel
+    // or its scrollbar moves the page instead of it.
+    m_sel->Reset(cl);
+    m_sel->Set(frame);
     m_mosaic.Invalidate();
     // The still itself was replaced by the stitched document.
     m_overlay.TouchBase();
-    // ChromeChanged, not Invalidate: the selection just grew, so the toolbar has
+    // ChromeChanged, not Invalidate: the selection just moved, so the toolbar has
     // to move to its new bottom edge.
     m_overlay.ChromeChanged();
 }
 
+// The wheel moves the document under the frame. The still follows through the
+// capture's origin, which CapOff() reads, so the base, the mosaic, the loupe and
+// the export all move together; the annotations live in client space and have to
+// be carried by hand or they would slide off the page they were drawn on.
+bool CaptureSession::ScrollLongShot(int delta) {
+    if (!m_lsEdit) return false;
+    const CRect frame = m_sel->Rect();
+    const int maxScroll = (std::max)(0, m_capture->Height() - frame.Height());
+    const int to = std::clamp(m_lsScroll + delta, 0, maxScroll);
+    if (to == m_lsScroll) return false;
+    const Gdiplus::REAL dy = (Gdiplus::REAL)(m_lsScroll - to);  // rows fall as we go down
+    m_lsScroll = to;
+
+    m_capture->SetOrigin(POINT{ m_overlay.Origin().x + frame.left,
+                                m_overlay.Origin().y + frame.top - m_lsScroll });
+    // Ink is pinned to the page, not to the viewport — and so is the copy each
+    // undo step holds, or stepping back would drop the shape at the row it was
+    // drawn on rather than the one it is on now.
+    for (size_t i = 0; i < m_annos.Count(); ++i) m_annos.At(i)->Translate(0, dy);
+    for (annot::Edit& e : m_undo)
+        if (e.item) e.item->Translate(0, dy);
+    m_mosaic.Invalidate();
+    // Only the frame's ground moves: the backdrop outside it is a still, and the
+    // frame itself is locked, so nothing beyond that rect is out of date.
+    m_overlay.TouchBaseIn(frame);
+    return true;
+}
+
+int CaptureSession::LongShotMaxScroll() const {
+    if (!m_lsEdit) return 0;
+    const CRect frame = m_sel->Rect();
+    return (std::max)(0, m_capture->Height() - frame.Height());
+}
+
+CRect CaptureSession::ExportRect() const {
+    if (!m_lsEdit) return m_sel->Rect();
+    // The frame only picks which part of the page is on screen; ✓ still owes the
+    // user the whole page.
+    const POINT off = CapOff();
+    return CRect(off.x, off.y, off.x + m_capture->Width(),
+                 off.y + m_capture->Height());
+}
+
 bool CaptureSession::LongShotSizeText(CString& text) const {
-    return m_longShot && m_longShot->Active() && m_longShot->SizeText(&text);
+    if (m_longShot && m_longShot->Active() && m_longShot->SizeText(&text)) return true;
+    // 编辑 frames part of the page, but the page is still what is being made, so
+    // the label keeps counting that rather than the window onto it.
+    if (!m_lsEdit) return false;
+    text.Format(L"%d x %d", m_capture->Width(), m_capture->Height());
+    return true;
 }
 
 bool CaptureSession::HitLongShotCaret(CPoint pt) const {
@@ -374,6 +444,10 @@ void CaptureSession::ToggleLongShotPreview() {
 
 void CaptureSession::PaintLongShot(Gdiplus::Graphics& g) {
     if (m_longShot) m_longShot->Paint(g);
+}
+
+CRect CaptureSession::LongShotPreviewRect() const {
+    return m_longShot ? m_longShot->PreviewRect() : CRect();
 }
 
 void CaptureSession::SetLongShotCaret(const CRect& r) {

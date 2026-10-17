@@ -114,6 +114,13 @@ $base = GrabPoints
 $names = @('dim@400,400', 'frame@799,825', 'hole@1150,825')
 'baseline: ' + ((0..2 | ForEach-Object { "$($names[$_])=$($base[$_].R),$($base[$_].G),$($base[$_].B)" }) -join '  ')
 
+# Where the log stands before the sweep, so the judgement below reads only the
+# hovers. The app truncates the log on its first paint and flushes every line,
+# so this is a real offset; the summon and the selection drag before it each
+# legitimately repaint the whole client.
+$skip = @(Get-Content 'D:\Project\winshot\obj\paint.log' -ErrorAction SilentlyContinue).Count
+"paints logged before the sweep: $skip"
+
 # Sweep the pointer across every slot, sampling through the tooltip delay.
 $spread = @(0, 0, 0)
 for ($slot = 0; $slot -le 14; $slot++) {
@@ -137,15 +144,15 @@ for ($slot = 0; $slot -le 14; $slot++) {
 # has to be read after the process is gone.
 if (-not $proc.HasExited) { $proc.Kill(); Start-Sleep -Milliseconds 300 }
 if (-not (Test-Path 'D:\Project\winshot\obj\paint.log')) { 'FAIL: no paint.log'; exit 1 }
-$rows = @(Get-Content 'D:\Project\winshot\obj\paint.log' | ForEach-Object {
+$rows = @(Get-Content 'D:\Project\winshot\obj\paint.log' |
+    Select-Object -Skip $skip | ForEach-Object {
     $f = $_.Split(' ')
     if ($f.Count -lt 3) { return }
     [pscustomobject]@{ ms = [double]$f[0] / 10000.0; area = [double]$f[1] * [double]$f[2] }
 })
-# The summon and the selection drag each legitimately repaint the whole client,
-# and how many paints they cost varies run to run, so judge the sweep by its
-# median: a tooltip card dirties a box a few tens of thousands of pixels wide,
-# and if every hover went back to the whole client the median would be 8.3M.
+# Only the hovers are left here. A tooltip card dirties a box a few tens of
+# thousands of pixels wide, and if every hover went back to the whole client the
+# median would be 8.3M.
 $tail = @($rows | Select-Object -Last 40)
 $areas = @($tail | ForEach-Object { $_.area } | Sort-Object)
 $med = $areas[[int]($areas.Count / 2)]

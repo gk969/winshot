@@ -4,8 +4,8 @@
 # button goes down, not trail across the region being drawn.
 #
 # The card's readout is a solid RGB(51,51,51) block 117x62 hanging under a 117x85
-# magnifier, both centred on the cursor, so counting near-51 pixels in that rect
-# says whether the card is up.
+# magnifier, the pair sitting 30px below-right of the cursor, so counting near-51
+# pixels in that rect says whether the card is up.
 Add-Type -AssemblyName System.Drawing, System.Windows.Forms
 Add-Type @"
 using System;
@@ -48,12 +48,26 @@ function Find-Sink() {
     [void][LP]::EnumWindows($cb, [IntPtr]::Zero)
     return $found.ToArray()
 }
+# loupe::CardRect, mirrored: below-right of the cursor by 30, mirrored to the
+# side with room at an edge.
+$BOXW = 117; $CARDH = 85 + 62 - 1; $GAP = 30
+$scrB = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds
+$scrW = $scrB.Width; $scrH = $scrB.Height
+function Card([int]$x, [int]$y) {
+    $l = $x + $GAP; $t = $y + $GAP
+    if ($t + $CARDH -gt $scrH) { $t = $y - [int]($CARDH / 2) }
+    if ($l + $BOXW -gt $scrW) { $l = $x - [int]($BOXW / 2); $t = $y - $GAP - $CARDH }
+    $l = [Math]::Max(0, [Math]::Min($l, $scrW - $BOXW))
+    $t = [Math]::Max(0, [Math]::Min($t, $scrH - $CARDH))
+    return @($l, $t)
+}
 # Pixels of the readout's flat 51,51,51 field in the rect the card would occupy
-# for a cursor at (x,y).
+# for a cursor at (x,y). The readout starts on the magnifier's bottom row.
 function Readout($bmp, [int]$x, [int]$y) {
+    $cd = Card $x $y
     $n = 0
-    for ($j = ($y + 42); $j -lt ($y + 104); $j++) {
-        for ($i = ($x - 58); $i -lt ($x + 59); $i++) {
+    for ($j = ($cd[1] + 84); $j -lt ($cd[1] + 85 + 62); $j++) {
+        for ($i = $cd[0]; $i -lt ($cd[0] + $BOXW); $i++) {
             $c = $bmp.GetPixel($i, $j)
             if ([Math]::Abs($c.R - 51) -le 8 -and [Math]::Abs($c.G - 51) -le 8 -and
                 [Math]::Abs($c.B - 51) -le 8) { $n++ }

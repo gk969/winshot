@@ -41,14 +41,18 @@ SelHandle SelectionModel::HitTest(POINT pt, int radius) const {
     for (int i = 0; i < 4; ++i)
         if (Near(pt, corners[i], radius)) return cornerHandles[i];
 
-    if (abs(pt.y - r.top) <= radius && pt.x >= r.left && pt.x <= r.right)
-        return SelHandle::Top;
-    if (abs(pt.y - r.bottom) <= radius && pt.x >= r.left && pt.x <= r.right)
-        return SelHandle::Bottom;
-    if (abs(pt.x - r.left) <= radius && pt.y >= r.top && pt.y <= r.bottom)
-        return SelHandle::Left;
-    if (abs(pt.x - r.right) <= radius && pt.y >= r.top && pt.y <= r.bottom)
-        return SelHandle::Right;
+    // The frame draws eight grips, four corners and four edge midpoints, and
+    // those are the only places a press resizes. Claiming the whole edge line
+    // would leave the rest of the frame with nothing to say about it.
+    const POINT mids[4] = {
+        { (r.left + r.right) / 2, r.top },   { r.right, (r.top + r.bottom) / 2 },
+        { (r.left + r.right) / 2, r.bottom }, { r.left, (r.top + r.bottom) / 2 },
+    };
+    const SelHandle midHandles[4] = {
+        SelHandle::Top, SelHandle::Right, SelHandle::Bottom, SelHandle::Left,
+    };
+    for (int i = 0; i < 4; ++i)
+        if (Near(pt, mids[i], radius)) return midHandles[i];
 
     return SelHandle::None;
 }
@@ -56,6 +60,13 @@ SelHandle SelectionModel::HitTest(POINT pt, int radius) const {
 bool SelectionModel::Contains(POINT pt) const {
     return pt.x >= m_rect.left && pt.x < m_rect.right &&
            pt.y >= m_rect.top && pt.y < m_rect.bottom;
+}
+bool SelectionModel::NearFrame(POINT pt, int band) const {
+    const RECT& r = m_rect;
+    if (pt.x < r.left - band || pt.x > r.right + band) return false;
+    if (pt.y < r.top - band || pt.y > r.bottom + band) return false;
+    return abs(pt.x - r.left) <= band || abs(pt.x - r.right) <= band ||
+           abs(pt.y - r.top) <= band || abs(pt.y - r.bottom) <= band;
 }
 
 void SelectionModel::BeginCreate(POINT anchor) {

@@ -15,6 +15,9 @@ inline constexpr int kFieldW = 115, kFieldH = 83;
 inline constexpr int kScale = 5;
 inline constexpr int kInfoH = 62;
 inline constexpr int kInfoPad = 6, kInfoLine = 14, kInfoFont = 12;
+// How far the card sits from the cursor: it is there to read a pixel, so it may
+// not cover it.
+inline constexpr int kGap = 30;
 
 inline const Gdiplus::Color kFrame(0xFF343434);
 inline const Gdiplus::Color kCross(0xFF4DCAFA);
@@ -22,7 +25,8 @@ inline const Gdiplus::Color kInfoBack(0xFF333333);
 inline const Gdiplus::Color kInfoText(0xFFFFFFFF);
 
 // Whole card — magnifier plus readout — for a cursor at `at`, clamped into
-// `bounds`. The card is centred on the cursor, so the crosshair lands on it.
+// `bounds`. Below-right of the cursor by kGap, clear of it; against an edge the
+// card mirrors to the side with room and returns to that corner once there is.
 RECT CardRect(HWND hwnd, CPoint at, const CRect& bounds);
 
 // The still's colour under the cursor, as the readout prints it. `off` is where

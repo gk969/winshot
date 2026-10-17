@@ -187,14 +187,14 @@ $win = @(860, 660, 1220, 900)
 $s = Grab 'D:\Project\winshot\obj\st_drawn.png'
 $box = Ink-Box $s $win[0] $win[1] $win[2] $win[3] $false
 if (-not $box) { 'FAIL: the rect was never drawn'; exit 1 }
-$w0 = Stroke $s $box $false
+$wRed = Stroke $s $box $false
 $s.Dispose()
-"rect drawn: ink box ($($box.l),$($box.t))..($($box.r),$($box.b))  red px=$($box.n)  left stroke=$w0"
+"rect drawn: ink box ($($box.l),$($box.t))..($($box.r),$($box.b))  red px=$($box.n)  left stroke=$wRed"
 
 # Select it: a point on its own stroke, a quarter of the way along the top edge
 # so it is not one of the eight bbox handles.
 $px = [int]($box.l + ($box.r - $box.l) / 4)
-$py = $box.t + [int]($w0 / 2)
+$py = $box.t + [int]($wRed / 2)
 Click $px $py
 $s = Grab 'D:\Project\winshot\obj\st_selected.png'
 $b2 = Ink-Box $s $win[0] $win[1] $win[2] $win[3] $false
@@ -272,8 +272,13 @@ $yelN = if ($yel) { $yel.n } else { 0 }
 # Counted off the handle discs; without the yellow box to locate the rect the
 # whole-window red count stands, which is what a failed recolour wants.
 $redN = if ($yel) { Ink-Count $s $yel $false 9 } elseif ($red) { $red.n } else { 0 }
+# The width baseline comes off the yellow box, not the red one it was drawn
+# with: recolouring leaves the stroke as thick as it was, and a yellow scan is
+# immune to the ClearType fringes on the desktop text behind it, which a red one
+# picks up as a stray pixel and reads as a wider box.
+$w0 = if ($yel) { Stroke $s $yel $true } else { 0 }
 $s.Dispose()
-"after the colour click: red px=$redN (off the handles)  yellow px=$yelN"
+"after the colour click: red px=$redN (off the handles)  yellow px=$yelN  left stroke=$w0"
 if ($yelN -lt 500 -or $redN -gt 200) {
     $fail += "the selected rect did not take the new colour (yellow $yelN, red left $redN)"
 }
