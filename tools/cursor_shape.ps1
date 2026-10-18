@@ -175,8 +175,13 @@ Click-Slot 0   # disarm, so a press on the ink moves rather than draws
 Expect 'over drawn ink' 950 700 'SIZEALL'
 Expect 'on the top-left corner' $sel[0] $sel[1] 'SIZENWSE'
 Expect 'on the top edge midpoint' ([int](($sel[0] + $sel[2]) / 2)) $sel[1] 'SIZENS'
-Expect '5px above the frame, away from a grip' 975 ($sel[1] - 5) 'SIZEALL'
-Expect '5px below the frame, away from a grip' 975 ($sel[3] + 5) 'SIZEALL'
+# A band a few px either side of the frame used to be the four-way cross, for a
+# press that dragged a new region out from just outside it. Once the region is
+# picked there is nothing such a press can work on, so the cursor says so too:
+# only the grips on the frame and the interior are live.
+Expect '5px above the frame, away from a grip' 975 ($sel[1] - 5) 'ARROW'
+Expect '5px below the frame, away from a grip' 975 ($sel[3] + 5) 'ARROW'
+Expect '5px inside the frame, away from a grip' 975 ($sel[1] + 5) 'SIZEALL'
 Expect 'far outside the frame' 1900 1500 'ARROW'
 
 # With no tool armed, a press inside the region moves the selection or an

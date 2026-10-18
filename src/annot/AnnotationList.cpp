@@ -54,18 +54,43 @@ void AnnotationList::DrawAll(Gdiplus::Graphics& g, const Annotation* skip) const
         if (a.get() != skip) a->Draw(g);
 }
 
-void DrawSelection(Gdiplus::Graphics& g, const Annotation& a, Gdiplus::REAL r) {
+Gdiplus::REAL HandleSize(const Annotation& a, Gdiplus::REAL base) {
+    switch (a.GetKind()) {
+    case Kind::Rect:
+    case Kind::Arrow: {
+        // A 8px outline is not grabbable by a 5px dot, so these two track the
+        // stroke. The 6 floor of headroom matters: DrawChrome clears the shape's
+        // rect padded by the default radius plus 3, and a marker's outer edge is
+        // its half-side plus half the border — past that the previous frame's
+        // marker sits outside the cleared rect and smears.
+        const Gdiplus::REAL byPen = a.PenWidth() * 0.5f + 2.0f;
+        Gdiplus::REAL r = byPen > base * 0.6f ? byPen : base * 0.6f;
+        if (r > 6.0f) r = 6.0f;
+        return r;
+    }
+    case Kind::Ellipse:
+    case Kind::Text:
+        // Neither has a stroke to match, and eight markers around a box or an
+        // outline the user can already see read better small.
+        return base * 0.5f;
+    default:
+        return base;
+    }
+}
+
+void DrawSelection(Gdiplus::Graphics& g, const Annotation& a, Gdiplus::REAL base) {
     if (a.NeedsBBoxGuide()) {
         Gdiplus::Pen box(kSel, 1.0f);
         g.DrawRectangle(&box, a.BBox());
     }
 
+    const Gdiplus::REAL r = HandleSize(a, base);
     Gdiplus::SolidBrush core(0xFFFFFFFF);
     Gdiplus::Pen ring(kSel, 1.5f);
     for (int i = 0; i < a.HandleCount(); ++i) {
         const Gdiplus::PointF c = a.HandleAt(i);
-        g.FillEllipse(&core, c.X - r, c.Y - r, r * 2.0f, r * 2.0f);
-        g.DrawEllipse(&ring, c.X - r, c.Y - r, r * 2.0f, r * 2.0f);
+        g.FillRectangle(&core, c.X - r, c.Y - r, r * 2.0f, r * 2.0f);
+        g.DrawRectangle(&ring, c.X - r, c.Y - r, r * 2.0f, r * 2.0f);
     }
 }
 

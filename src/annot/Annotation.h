@@ -28,6 +28,11 @@ public:
     // 箭头-点击已画箭头可调整方向 位置 长短.png shows only the two endpoint rings.
     virtual bool NeedsBBoxGuide() const { return true; }
 
+    // The stroke the shape is drawn with, in device px, or 0 for shapes that
+    // have none. The selection chrome sizes its handles from it, so a thick
+    // outline is not left with a marker thinner than the line it grabs.
+    virtual Gdiplus::REAL PenWidth() const { return 0.0f; }
+
     virtual int HandleCount() const = 0;
     virtual Gdiplus::PointF HandleAt(int i) const = 0;
     virtual void MoveHandle(int i, Gdiplus::PointF pt) = 0;

@@ -15,6 +15,14 @@ class MosaicSource;
 // the committed annotation agree on metrics.
 extern const wchar_t kTextFace[];
 
+// The 文字 box padding and floor. Shared so the red frame the editor strokes and
+// the box the committed label carries are the same rect — the frame must not
+// jump when the edit commits. Both are unscaled design px; a shape scales them
+// by its own dpiScale.
+inline constexpr int kTextPadX = 4;
+inline constexpr int kTextPadY = 20;
+inline constexpr int kTextMinW = 40;
+
 // Rect and ellipse share a bounding box and its eight handles; only the paint
 // and the hit test differ.
 class ShapeBox : public Annotation {
@@ -35,6 +43,7 @@ public:
         return Gdiplus::RectF(m_box.X - pad, m_box.Y - pad,
                               m_box.Width + pad * 2.0f, m_box.Height + pad * 2.0f);
     }
+    Gdiplus::REAL PenWidth() const override { return m_pen; }
     int HandleCount() const override { return kBoxHandles; }
     Gdiplus::PointF HandleAt(int i) const override { return BoxHandleAt(m_box, i); }
     void MoveHandle(int i, Gdiplus::PointF pt) override { BoxResize(m_box, i, pt); }
@@ -90,7 +99,17 @@ public:
     bool IsEmpty() const override { return m_pts.size() < 2; }
 
     Gdiplus::RectF BBox() const override;
+    // Anti-aliasing feathers the edge about a pixel past the geometric outline,
+    // and BBox() already carries only half a pixel of slack. Without the extra
+    // room the fringe lands outside the rect the overlay clears before it
+    // redraws, and the previous frame's stroke bleeds through next to it.
+    Gdiplus::RectF InkBBox() const override {
+        const Gdiplus::RectF b = BBox();
+        return Gdiplus::RectF(b.X - 1.5f, b.Y - 1.5f, b.Width + 3.0f,
+                              b.Height + 3.0f);
+    }
     bool HitTest(Gdiplus::PointF pt) const override;
+    Gdiplus::REAL PenWidth() const override { return m_pen; }
     int HandleCount() const override { return 0; }
     Gdiplus::PointF HandleAt(int) const override { return Gdiplus::PointF(); }
     void MoveHandle(int, Gdiplus::PointF) override {}
@@ -155,6 +174,7 @@ public:
     bool HitTest(Gdiplus::PointF pt) const override;
     Gdiplus::RectF BBox() const override;
     bool NeedsBBoxGuide() const override { return false; }
+    Gdiplus::REAL PenWidth() const override { return m_pen; }
     int HandleCount() const override { return 2; }
     Gdiplus::PointF HandleAt(int i) const override { return i == 0 ? m_p0 : m_p1; }
     void MoveHandle(int i, Gdiplus::PointF pt) override {
@@ -212,23 +232,30 @@ private:
     Gdiplus::REAL m_r;
 };
 
-// The 文字 tool: one line of text at a fixed size, committed from an inline edit
-// control. 文字-已添加.png shows it with no frame and no selection chrome.
+// The 文字 tool: text at a fixed size inside a box the user owns. Committed from
+// an inline edit control, which hands over the box it ended on; the box then
+// drives the wrap width, and lines that no longer fit inside it are hidden
+// rather than growing the box. 文字-已添加.png shows it with no frame until it is
+// selected, when it picks up the same eight handles a rectangle has.
 class ShapeText : public Annotation {
 public:
-    ShapeText(Gdiplus::PointF at, CString text, Gdiplus::Color ink, Gdiplus::REAL fontPx)
-        : m_at(at), m_text(std::move(text)), m_ink(ink), m_fontPx(fontPx) {}
+    ShapeText(const Gdiplus::RectF& box, CString text, Gdiplus::Color ink,
+              Gdiplus::REAL fontPx, Gdiplus::REAL dpiScale)
+        : m_box(box), m_text(std::move(text)), m_ink(ink), m_fontPx(fontPx),
+          m_dpiScale(dpiScale) {}
 
     Kind GetKind() const override { return Kind::Text; }
     void Draw(Gdiplus::Graphics& g) const override;
     bool HitTest(Gdiplus::PointF pt) const override;
-    Gdiplus::RectF BBox() const override;
-    int HandleCount() const override { return 0; }
-    Gdiplus::PointF HandleAt(int) const override { return Gdiplus::PointF(); }
-    void MoveHandle(int, Gdiplus::PointF) override {}
+    // The ink is clipped to the box, so the box is both the handle geometry and
+    // what has to stay inside the 选区.
+    Gdiplus::RectF BBox() const override { return m_box; }
+    int HandleCount() const override { return kBoxHandles; }
+    Gdiplus::PointF HandleAt(int i) const override { return BoxHandleAt(m_box, i); }
+    void MoveHandle(int i, Gdiplus::PointF pt) override;
     void Translate(Gdiplus::REAL dx, Gdiplus::REAL dy) override {
-        m_at.X += dx;
-        m_at.Y += dy;
+        m_box.X += dx;
+        m_box.Y += dy;
     }
     bool IsEmpty() const override { return m_text.IsEmpty(); }
     std::unique_ptr<Annotation> Clone() const override;
@@ -236,23 +263,49 @@ public:
     void SetStyle(Gdiplus::Color ink, Gdiplus::REAL) override { m_ink = ink; }
 
     const CString& Text() const { return m_text; }
-    void SetText(const CString& t) { m_text = t; }
+    void SetText(const CString& t);
     Gdiplus::Color Ink() const { return m_ink; }
     Gdiplus::REAL FontPx() const { return m_fontPx; }
-    Gdiplus::PointF At() const { return m_at; }
+    Gdiplus::PointF At() const { return Gdiplus::PointF(m_box.X, m_box.Y); }
+    // The box the inline editor ended on, adopted on commit: re-editing a label
+    // that was narrowed and then filled up has to be able to grow it again.
+    void AdoptBox(const Gdiplus::RectF& box);
 
 private:
-    Gdiplus::RectF Layout() const;  // the DrawString box, in client px
+    Gdiplus::REAL PadX() const;
+    Gdiplus::REAL PadY() const;
+    Gdiplus::REAL LineHeight() const;
+    // The wrap width: the box less the padding the editor keeps around the text.
+    Gdiplus::REAL TextWidth() const;
+    // Wrapped to TextWidth(), rebuilt whenever the text or the width changes —
+    // BBox() and HitTest() run several times per mouse move.
+    const std::vector<CString>& Lines() const;
+    void InvalidateLayout() const;
 
-    Gdiplus::PointF m_at;
+    mutable CString m_src;        // the text m_lines was built from
+    mutable Gdiplus::REAL m_srcW = -1.0f;  // ...and the width it was built for
+    mutable std::vector<CString> m_lines;
+
+    Gdiplus::RectF m_box;
     CString m_text;
     Gdiplus::Color m_ink;
     Gdiplus::REAL m_fontPx;
+    Gdiplus::REAL m_dpiScale;
 };
 
 // Width `text` takes in the 文字 face at `fontPx`, so the inline editor can grow
 // its box with what is typed.
 Gdiplus::REAL MeasureTextWidth(const CString& text, Gdiplus::REAL fontPx);
+
+// The line pitch the 文字 face uses at `fontPx`, in px. The editor needs it to
+// know how tall to grow and the label needs it to place each line.
+Gdiplus::REAL MeasureTextLineHeight(Gdiplus::REAL fontPx);
+
+// `text` broken to fit `maxW`: Latin at the last space that fits, CJK between
+// any two characters. Shared by the editor and the committed label so the two
+// break in exactly the same place and the text does not move on commit.
+std::vector<CString> WrapLines(const CString& text, Gdiplus::REAL fontPx,
+                               Gdiplus::REAL maxW);
 
 // Starts the shape for the active tool at the press point; the drag then grows
 // it through Annotation::UpdateDrag. `ordinal` numbers the badge tool, `mosaic`

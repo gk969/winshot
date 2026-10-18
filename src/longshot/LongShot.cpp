@@ -19,6 +19,12 @@ const wchar_t kFontFace[] = L"Microsoft YaHei UI";
 const UINT_PTR kPollTimer = 1;
 const int kPollMs = 150;
 
+// How far one wheel notch moves an ordinary page, in px. The allowance is
+// measured in notches against m_maxStep, the largest shift one Tick can still
+// match, so a short selection — where m_maxStep is small — gets a smaller
+// allowance rather than the same fixed number that overshoots it.
+constexpr int kNotchPx = 140;
+
 // Bar geometry measured off 长截图-点击后.png: 161x32, the 编辑 label, a
 // divider at 40, three 28px icon slots, then the 完成 label.
 constexpr int kBarW = 161, kBarH = 32;
@@ -417,6 +423,22 @@ namespace ls {
 
 Controller::Controller(CaptureSession* session) : m_session(session) {}
 
+Controller* Controller::s_ctl = nullptr;
+HHOOK Controller::s_hook = nullptr;
+
+LRESULT CALLBACK Controller::WheelHook(int code, WPARAM wp, LPARAM lp) {
+    // Windows 10 sends the wheel to whatever the cursor is over, not to the
+    // focused window, and inside the hole the overlay is hit-test transparent —
+    // so a notch aimed at the page never reaches any handler of ours and cannot
+    // be throttled from inside the message map. A low-level hook runs before the
+    // routing, which makes it the one place the notch can be refused.
+    if (code >= 0 && wp == WM_MOUSEWHEEL && s_ctl &&
+        ::PtInRect(&s_ctl->m_hole, ((const MSLLHOOKSTRUCT*)lp)->pt) != FALSE &&
+        !s_ctl->AllowWheel())
+        return 1;  // refused: the page does not move for this one
+    return ::CallNextHookEx(s_hook, code, wp, lp);
+}
+
 Controller::~Controller() {
     Stop();
 }
@@ -446,7 +468,20 @@ bool Controller::Start() {
     m_preview = true;
     m_showTip = true;
     m_stopped = false;
+    // Notches that fit in one sample's worth of travel, with one notch of slack
+    // for the sample landing between two. A 600px hole allows 2, a 400px hole 1
+    // — where 2 would be 282px against a 240px ceiling and read as a jump.
+    m_wheelGrant = (std::max)(1, (m_maxStep - kNotchPx) / kNotchPx);
+    m_wheelCredit = m_wheelGrant;
     m_caret.SetRectEmpty();
+
+    // The wheel has to be refused before Windows routes it, so the hook goes in
+    // with the hole: from that moment on the cursor is over the page, not us.
+    if (!s_hook) {
+        s_ctl = this;
+        s_hook = ::SetWindowsHookExW(WH_MOUSE_LL, WheelHook,
+                                     ::GetModuleHandleW(nullptr), 0);
+    }
 
     // Cut the hole before the first grab: until then the overlay covers the
     // region and the seed frame would be our own dimmed copy of it.
@@ -475,6 +510,11 @@ bool Controller::Start() {
 }
 
 void Controller::Stop() {
+    if (s_hook) {
+        ::UnhookWindowsHookEx(s_hook);
+        s_hook = nullptr;
+        s_ctl = nullptr;
+    }
     if (m_bar) {
         if (m_bar->GetSafeHwnd()) m_bar->SetPolling(false);
         if (HWND h = m_bar->GetSafeHwnd()) m_bar->DestroyWindow();
@@ -487,6 +527,15 @@ void Controller::Stop() {
     if (m_active && m_session && m_session->Overlay().GetSafeHwnd())
         m_session->Overlay().SetHole(CRect());
     m_active = false;
+}
+
+bool Controller::AllowWheel() {
+    // Once the stitcher has stopped the user is scrolling for themselves and
+    // nothing is being matched any more.
+    if (m_stopped) return true;
+    if (m_wheelCredit <= 0) return false;
+    --m_wheelCredit;
+    return true;
 }
 
 void Controller::Tick() {
@@ -518,6 +567,9 @@ void Controller::Tick() {
         ShowStatus(L"画面变化过大，已停止自动拼接");
         return;
     }
+    // The page is accounted for: from here the queue starts over, so the wheel
+    // is worth the allowance again until the next sample.
+    m_wheelCredit = m_wheelGrant;
     if (sh.rows == 0) return;
 
     // Negative rows means the pointer scrolled up, and the new content is at the

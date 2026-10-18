@@ -12,6 +12,12 @@ inline void Normalize(RECT& r) {
     if (r.bottom < r.top) std::swap(r.top, r.bottom);
 }
 
+// std::clamp asserts lo <= hi in a debug build, and a region narrower than what
+// is drawn on it is exactly that.
+inline int ClampBetween(int v, int lo, int hi) {
+    return std::min(std::max(v, lo), hi);
+}
+
 }  // namespace
 
 void SelectionModel::Reset(RECT bounds) {
@@ -89,6 +95,7 @@ void SelectionModel::MoveTo(RECT r) {
     int l = std::clamp(r.left, m_bounds.left, m_bounds.right - w);
     int t = std::clamp(r.top, m_bounds.top, m_bounds.bottom - h);
     m_rect = { l, t, l + w, t + h };
+    KeepInside(m_rect);
     m_default = false;
 }
 
@@ -115,6 +122,7 @@ void SelectionModel::Resize(SelHandle handle, POINT pt) {
     }
     Normalize(r);
     Clamp(r);
+    KeepIn(r);
     m_rect = r;
 }
 
@@ -132,6 +140,8 @@ void SelectionModel::Nudge(int dx, int dy, bool resizeEdges) {
     }
     Normalize(r);
     Clamp(r);
+    if (resizeEdges) KeepIn(r);
+    else KeepInside(r);
     m_rect = r;
 }
 
@@ -140,4 +150,26 @@ void SelectionModel::Clamp(RECT& r) const {
     if (r.top < m_bounds.top) r.top = m_bounds.top;
     if (r.right > m_bounds.right) r.right = m_bounds.right;
     if (r.bottom > m_bounds.bottom) r.bottom = m_bounds.bottom;
+}
+
+// A resize moves one edge, so the fix is to push that edge back out to the
+// drawings it was about to leave behind. The drawings are always inside the
+// bounds, so this cannot take the region off screen.
+void SelectionModel::KeepIn(RECT& r) const {
+    if (!HasKeepIn()) return;
+    if (r.left > m_keepIn.left) r.left = m_keepIn.left;
+    if (r.top > m_keepIn.top) r.top = m_keepIn.top;
+    if (r.right < m_keepIn.right) r.right = m_keepIn.right;
+    if (r.bottom < m_keepIn.bottom) r.bottom = m_keepIn.bottom;
+}
+
+// A move keeps its size, so the whole region stops: the edge that was catching
+// up with the drawings stays on them, and the far edge comes with it.
+void SelectionModel::KeepInside(RECT& r) const {
+    if (!HasKeepIn()) return;
+    const int w = r.right - r.left, h = r.bottom - r.top;
+    r.left = ClampBetween(r.left, m_keepIn.right - w, m_keepIn.left);
+    r.top = ClampBetween(r.top, m_keepIn.bottom - h, m_keepIn.top);
+    r.right = r.left + w;
+    r.bottom = r.top + h;
 }

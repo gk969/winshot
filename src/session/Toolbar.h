@@ -95,7 +95,7 @@ inline constexpr int kDefaultColor = 10;  // the red the reference starts on
 // into kDotSizes; the shape tools resolve it to pixels when they draw.
 struct Style {
     int colorIndex = kDefaultColor;
-    int widthIndex = 2;   // the reference has the widest dot selected for 矩形
+    int widthIndex = 1;   // the middle dot: the widest one covers what is under it
     int fontSize = 18;
     int blurBlockSize = 12;
     // Logical→physical factor, set once per capture. Tools whose size is a

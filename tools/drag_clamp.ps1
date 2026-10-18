@@ -90,10 +90,10 @@ function Rect-Of([IntPtr]$h) {
 function IsRed($c) { return ($c.R -gt 190 -and $c.G -lt 120 -and $c.B -lt 130) }
 # ClearType puts single red pixels along the edges of desktop text, and one of
 # those a hundred pixels from the shape moves the box's corner by a hundred
-# pixels. The stroke is 8px wide, so a pixel with red 3px either way is ink and
-# a fringe is not.
+# pixels. The default stroke is the middle dot, 4px, so the span is 1px either
+# way: enough to reject a fringe, narrow enough to stay inside the stroke.
 function Solid($bmp, [int]$x, [int]$y) {
-    foreach ($d in @(-3, 3)) {
+    foreach ($d in @(-1, 1)) {
         if (-not (IsRed ($bmp.GetPixel($x + $d, $y)))) { return $false }
         if (-not (IsRed ($bmp.GetPixel($x, $y + $d)))) { return $false }
     }
@@ -117,9 +117,9 @@ function Ink-Box($bmp, [int]$x0, [int]$y0, [int]$x1, [int]$y1) {
 }
 
 $sel = @(800, 600, 1500, 1050)
-# The stroke is 8px and a selected element also wears a red ring with white
-# handle circles, so the ink reaches a little past the element's own box. That
-# overhang is what the tolerance allows for; the element itself never does.
+# A selected element wears a red ring with white handle circles, and the stroke
+# reaches half its width past the element's own box, so the ink gets a little
+# past it. That overhang is what the tolerance allows for; the element never does.
 $TOL = 16
 $fail = @()
 

@@ -56,6 +56,10 @@ public:
     // the last one clicked is not something a user expects to step back through.
     void ApplyStyleToSelected();
     void Undo();
+    // 框外右键: everything since the capture opened is withdrawn — the drawings,
+    // the undo history that could bring them back, and the armed tool — and the
+    // region goes back to the whole screen.
+    void ResetCanvas();
 
     // The 文字 tool's inline editor. It lives here rather than on the overlay so
     // the toolbar, the property bar and the overlay can all reach it; the
@@ -63,6 +67,11 @@ public:
     void BeginTextEdit(CPoint at, annot::ShapeText* target = nullptr);
     void EndTextEdit(bool commit);
     CTextEditor* Editor() const { return m_editor.get(); }
+    // The label the editor is rewriting, or null for a fresh one. The overlay
+    // leaves it out of its cached canvas for the whole edit: the editor paints
+    // its own background out of that canvas, so the committed glyphs left in
+    // there show through behind the text being typed as a double image.
+    annot::Annotation* EditingAnno() const { return m_editSkip; }
 
     // The 字号 dropdown, drawn on the overlay under the property bar's box.
     // `fontBoxScreen` is that box's rect in screen coords.
@@ -159,13 +168,16 @@ private:
     tb::Id m_activeTool = tb::Id::None;
     tb::Style m_style;
     // Last-used widthIndex per tool, indexed by tb::Id (Rect..Badge, contiguous).
-    int m_widthByTool[7] = { 2, 2, 0, 2, 2, 2, 2 };
+    // Every tool opens on the middle dot; SetActiveTool overwrites Style's copy
+    // from here, so the default has to live in both places.
+    int m_widthByTool[7] = { 1, 1, 1, 1, 1, 1, 1 };
     TipCard m_tip;
     annot::AnnotationList m_annos;
     MosaicCache m_mosaic{ this };
     annot::UndoStack m_undo;
     int m_selIdx = -1;
     std::unique_ptr<CTextEditor> m_editor;
+    annot::Annotation* m_editSkip = nullptr;
     bool m_ocrBusy = false;
     // 长截图 编辑: the still is a stitched document taller than the frame that
     // shows it, and m_lsScroll is how many of its rows are above the top edge.

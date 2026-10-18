@@ -80,10 +80,12 @@ function Rect-Of([IntPtr]$h) {
     return $r
 }
 function IsRed($c) { return ($c.R -gt 190 -and $c.G -lt 120 -and $c.B -lt 130) }
-# ClearType puts single red pixels along desktop text; the stroke is 8px, so
-# requiring red 3px either way keeps the ink and drops the fringes.
+# ClearType puts single red pixels along desktop text, so a pixel only counts as
+# ink with red on both sides of it. The span has to stay inside the stroke: the
+# default width is the middle dot now, 4px, so 3px either way falls off the edge
+# of it and the whole shape reads as gone.
 function Solid($bmp, [int]$x, [int]$y) {
-    foreach ($d in @(-3, 3)) {
+    foreach ($d in @(-1, 1)) {
         if (-not (IsRed ($bmp.GetPixel($x + $d, $y)))) { return $false }
         if (-not (IsRed ($bmp.GetPixel($x, $y + $d)))) { return $false }
     }
@@ -118,9 +120,9 @@ function Ink-Box($bmp, [int]$x0, [int]$y0, [int]$x1, [int]$y1, $skip = @()) {
 }
 
 $sel = @(800, 600, 1500, 1050)
-# The 8px stroke reaches 4px past the shape's own corners, and the solid-ink
-# test pulls the measured box 3px back in, so the corner lands within a couple
-# of px of where the pointer left off.
+# The stroke reaches half its width past the shape's own corners and the solid-ink
+# test pulls the measured box back in by a pixel, so the corner lands within a
+# couple of px of where the pointer left off; the walk steps are 27px apart.
 $TOL = 24
 $fail = @()
 

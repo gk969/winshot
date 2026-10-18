@@ -183,6 +183,12 @@ $barMidY = [int](($barTop + $bb[1]) / 2)
 # The rail row: 4px tall, centred in the bar.
 $railY = [int](($barTop + $bb[1]) / 2)
 
+# The widest dot, not the default middle one: every threshold below is about what
+# a mosaic block does to a stroke, and the middle dot's 4px line is only one block
+# wide at the small setting, so it is the stroke that disappears rather than the
+# block doing the averaging. Dot centres are at bar x + 13 + i * 25.
+Click ($barLeft + 63) $barMidY
+
 # --- 画笔 (slot 3): three reference lines --------------------------------
 foreach ($y in $lnY) { Drag $lnX0 $y $lnX1 $y }
 $s1 = Grab 'D:\Project\winshot\obj\s5c_full1.png'
@@ -207,6 +213,10 @@ for ($try = 0; $try -lt 3; $try++) {
     if ($rail -ge 90) { break }
 }
 if ($try -gt 0) { "mosaic tool click needed $try extra attempt(s); rail=$rail" }
+# The mosaic band is twice the stroke width, and the measurement window is 13px
+# wide: at the default dot the band is 8px and most of the window is untouched
+# ink at every block size, which reads as "the mosaic did nothing".
+Click ($barLeft + 63) $barMidY
 $label = InkCount $s2 ($barLeft + (Sx 86)) ($barTop + 8) ($barLeft + (Sx 122)) ($bb[1] - 8)
 $swatch = RedCount $s2 ($barLeft + (Sx 85)) ($barTop + 5) ($barLeft + (Sx 111)) ($barTop + 31)
 "mosaic bar: rail=$rail px (want ~110) label ink=$label (want >20) red swatch=$swatch (want 0)"

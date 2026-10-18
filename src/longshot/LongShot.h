@@ -33,6 +33,15 @@ public:
 
     bool Active() const { return m_active; }
 
+    // False when the stitcher already has more than a frame's worth of wheel
+    // notches still to be sampled. Those notches get dropped: a page that moves
+    // further between two samples than the stitcher can match against is not a
+    // long shot, it is two unrelated screenshots. Called from the low-level
+    // wheel hook below, which is the only place a notch is reachable — inside
+    // the hole this window is hit-test transparent, so the wheel goes to the
+    // page by cursor position and never to a message handler of ours.
+    bool AllowWheel();
+
     // Bar actions, in bar order: 编辑 ↓ ✕ ✓完成.
     void OnEdit();
     void OnSave();
@@ -81,6 +90,13 @@ private:
     void StopPolling();
     void Repaint();
 
+    // WH_MOUSE_LL for the life of a session. A low-level hook sees the wheel
+    // before Windows routes it, which is the only way to stop a notch that is
+    // addressed to the window under the cursor rather than to us.
+    static LRESULT CALLBACK WheelHook(int code, WPARAM wp, LPARAM lp);
+    static Controller* s_ctl;
+    static HHOOK s_hook;
+
     CaptureSession* m_session;
     bool m_active = false;
     CRect m_sel{};     // overlay client coords: the hole
@@ -99,6 +115,11 @@ private:
     bool m_preview = true;
     bool m_showTip = true;
     bool m_stopped = false;
+    // Wheel notches still allowed before the next sample. Refilled every time
+    // Tick samples the page, so the queue never grows past what one Tick can
+    // absorb; m_wheelGrant is that allowance, sized from m_maxStep.
+    int m_wheelCredit = 0;
+    int m_wheelGrant = 0;
 
     std::unique_ptr<CBarWnd> m_bar;
     std::unique_ptr<CTipWnd> m_tipWnd;

@@ -131,6 +131,15 @@ function AccentCount($bmp, [int]$x0, [int]$y0, [int]$x1, [int]$y1) {
     }
     return $n
 }
+# The label's own ink. A committed label is drawn with a 1px guide box and eight
+# 5px handle rings on that box's edges, and the box is only 42px tall, so every
+# window wide enough for the glyphs also catches the rings — which is how this
+# came to compare 291 against 368 for the same string. The band below starts
+# inside the left rings and ends inside the right ones, and between the top and
+# bottom rows of rings, so it counts glyphs only.
+function GlyphInk($bmp) {
+    return RedCount $bmp ($edit[0] + 8) ($edit[1] + 8) ($edit[0] + 44) ($edit[1] + 34)
+}
 # Bounding box of the near-white 字号 box inside the property bar.
 function WhiteBox($bmp, [int]$x0, [int]$y0, [int]$x1, [int]$y1) {
     $l = 99999; $r = -1; $t = 99999; $b = -1
@@ -270,7 +279,7 @@ Start-Sleep -Milliseconds 600
 Start-Sleep -Milliseconds 600
 
 $s7 = Grab 'D:\Project\winshot\obj\s5b_full7.png'
-$ink = RedCount $s7 ($edit[0] + 2) ($edit[1] + 2) ($edit[0] + 90) ($edit[1] + 30)
+$ink = GlyphInk $s7
 $corner = 0
 if (IsRed ($s7.GetPixel($fx0, $fy0))) { $corner++ }
 if (IsRed ($s7.GetPixel($fx1, $fy1))) { $corner++ }
@@ -302,12 +311,12 @@ Start-Sleep -Milliseconds 500
 MoveTo 2200 1700
 Start-Sleep -Milliseconds 300
 $s9 = Grab 'D:\Project\winshot\obj\s5b_full9.png'
-$after = RedCount $s9 ($edit[0] + 2) ($edit[1] + 2) ($edit[0] + 120) ($edit[1] + 30)
+$after = GlyphInk $s9
 [void](Crop $s9 ($edit[0] - 40) ($edit[1] - 30) 300 100 'D:\Project\winshot\obj\s5b_reedit2.png')
 [void][System.Windows.Forms.SendKeys]::SendWait('^z')
 Start-Sleep -Milliseconds 500
 $sA = Grab 'D:\Project\winshot\obj\s5b_fullA.png'
-$back = RedCount $sA ($edit[0] + 2) ($edit[1] + 2) ($edit[0] + 120) ($edit[1] + 30)
+$back = GlyphInk $sA
 [void](Crop $sA ($edit[0] - 40) ($edit[1] - 30) 300 100 'D:\Project\winshot\obj\s5b_reedit3.png')
 "ink committed=$ink after re-edit=$after after Ctrl+Z=$back  (want back ~= committed)"
 if ([Math]::Abs($back - $ink) -gt 40) { "FAIL: Ctrl+Z did not restore the old string"; exit 1 }

@@ -116,6 +116,26 @@ void CaptureSession::Undo() {
     m_overlay.TouchBase();
 }
 
+void CaptureSession::ResetCanvas() {
+    // An open 文字 edit points at a shape this is about to delete, so close it
+    // first. Nothing is committed: the label goes with the rest of the canvas.
+    if (m_editor) EndTextEdit(false);
+    // The history goes with the drawings: undoing after this would put back
+    // shapes the region no longer covers, which is exactly what the reset is
+    // meant to clear.
+    m_annos.Clear();
+    m_undo.clear();
+    m_selIdx = -1;
+    SetActiveTool(tb::Id::None);
+    m_sel->Set(m_sel->Bounds());
+    m_mosaic.Invalidate();
+    m_overlay.ResetPicked();
+    m_overlay.TouchBase();
+    // The bars hang off the region's bottom edge, and the property bar just
+    // went away with the tool, so both have to move.
+    m_overlay.LayoutChrome();
+}
+
 void CaptureSession::Accept() {
     std::unique_ptr<Gdiplus::Bitmap> bmp = out::RenderSelection(
         *m_capture, ExportRect(), m_annos, CapOff());
@@ -218,14 +238,35 @@ void CaptureSession::BeginTextEdit(CPoint at, annot::ShapeText* target) {
         ink = target->Ink();
     }
     const int fontPx = (int)std::lround(m_style.fontSize * m_style.dpiScale);
+    const HWND hw = m_overlay.GetSafeHwnd();
+
+    // The box grows right and down from the press point, so a click near the
+    // frame's right or bottom edge has to start back far enough for its first
+    // line to be inside the 选区 at all.
+    const CRect sel(m_sel->Rect());
+    origin.x = std::min<LONG>(origin.x, sel.right - Dpi::S(hw, annot::kTextMinW));
+    origin.y = std::min<LONG>(origin.y,
+                              sel.bottom - fontPx - Dpi::S(hw, annot::kTextPadY));
+
+    // The editor paints its own background out of the overlay's base buffer, so
+    // that buffer has to be current before the child gets its first paint — the
+    // child is above us in z-order and paints first. Current, and current
+    // without this label's own committed glyphs: they would come back through
+    // the transparent backdrop as a ghost behind what is being typed.
+    m_editSkip = target;
+    if (target) m_overlay.DropFromBase(*target);
+    m_overlay.UpdateWindow();
 
     auto ed = std::make_unique<CTextEditor>();
     const CRect box(origin.x, origin.y,
-                    origin.x + Dpi::S(m_overlay.GetSafeHwnd(), 40),
-                    origin.y + fontPx + Dpi::S(m_overlay.GetSafeHwnd(), 20));
+                    origin.x + Dpi::S(hw, annot::kTextMinW),
+                    origin.y + fontPx + Dpi::S(hw, annot::kTextPadY));
     if (!ed->Create(&m_overlay, this, origin, text, fontPx, ink, SampleBack(box),
-                    target))
+                    target)) {
+        m_editSkip = nullptr;
+        m_overlay.TouchBase();
         return;
+    }
     m_editor = std::move(ed);
     m_overlay.InvalidateRect(nullptr, FALSE);
 }
@@ -235,14 +276,25 @@ void CaptureSession::EndTextEdit(bool commit) {
 
     const CString text = m_editor->Text();
     annot::ShapeText* target = m_editor->Target();
-    const CPoint at = m_editor->At();
+    // The box the editor ended on becomes the label's: it owns the wrap width
+    // from here on, and its height is whatever the text needed at that width.
+    const CRect frame = m_editor->Frame();
     const int fontPx = m_editor->FontPx();
     const Gdiplus::Color ink = target ? target->Ink() : m_style.Color();
     m_editor.reset();
+    // The label is the base's to draw again, from here on — and the base has to
+    // be told, because it has been holding the canvas without it. Cancelling is
+    // the case that shows: nothing else repaints those rows, so an unmarked base
+    // would leave the label gone for good.
+    m_editSkip = nullptr;
+    if (target) m_overlay.DropFromBase(*target);
     // Killing the edit leaves focus nowhere; the keyboard shortcuts live on the
     // overlay, so take it back.
     m_overlay.SetFocus();
 
+    const Gdiplus::RectF box((Gdiplus::REAL)frame.left, (Gdiplus::REAL)frame.top,
+                             (Gdiplus::REAL)frame.Width(),
+                             (Gdiplus::REAL)frame.Height());
     if (commit && !text.IsEmpty()) {
         if (target) {
             // Re-editing keeps the object: undo puts the old string back rather
@@ -250,11 +302,11 @@ void CaptureSession::EndTextEdit(bool commit) {
             const int idx = m_annos.IndexOf(target);
             std::unique_ptr<annot::Annotation> before = target->Clone();
             target->SetText(text);
+            target->AdoptBox(box);
             RecordMove(idx, std::move(before));
         } else {
             AddAnnotation(std::make_unique<annot::ShapeText>(
-                Gdiplus::PointF((Gdiplus::REAL)at.x, (Gdiplus::REAL)at.y), text,
-                ink, (Gdiplus::REAL)fontPx));
+                box, text, ink, (Gdiplus::REAL)fontPx, m_style.dpiScale));
         }
     }
     m_overlay.InvalidateRect(nullptr, FALSE);

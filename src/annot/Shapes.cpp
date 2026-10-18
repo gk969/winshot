@@ -41,23 +41,117 @@ void NoWrap(Gdiplus::StringFormat& fmt) {
     fmt.SetLineAlignment(Gdiplus::StringAlignmentNear);
 }
 
+// Curves and diagonals only. Set per shape rather than on the caller's Graphics
+// because the same Graphics also strokes the 1px selection frame, the size label
+// and the scrollbar, and those have to stay sharp; an axis-aligned rectangle is
+// left out too, where anti-aliasing can only soften an edge that is already
+// straight.
+class Smooth {
+public:
+    explicit Smooth(Gdiplus::Graphics& g)
+        : m_g(g), m_old(g.GetSmoothingMode()) {
+        g.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
+    }
+    ~Smooth() { m_g.SetSmoothingMode(m_old); }
+
+private:
+    Gdiplus::Graphics& m_g;
+    Gdiplus::SmoothingMode m_old;
+};
+
 }  // namespace
 
 // The face the 文字 tool draws with; the inline editor uses the same one so the
 // committed text lands exactly where the caret was.
 const wchar_t kTextFace[] = L"Microsoft YaHei UI";
 
+namespace {
+
+// Wrapping measures a string per character, and building the face each time is
+// what would put that cost in every keystroke.
+class TextMeasurer {
+public:
+    explicit TextMeasurer(Gdiplus::REAL fontPx)
+        : m_tmp(1, 1, PixelFormat32bppARGB), m_g(&m_tmp), m_family(kTextFace),
+          m_font(&m_family, fontPx, Gdiplus::FontStyleRegular,
+                 Gdiplus::UnitPixel) {
+        NoWrap(m_fmt);
+    }
+
+    Gdiplus::REAL Width(const CString& s) const {
+        if (s.IsEmpty()) return 0.0f;
+        Gdiplus::RectF box(0.0f, 0.0f, 100000.0f, 100000.0f), out{};
+        m_g.MeasureString(s, s.GetLength(), &m_font, box, &m_fmt, &out);
+        return out.Width;
+    }
+
+private:
+    Gdiplus::Bitmap m_tmp;
+    Gdiplus::Graphics m_g;
+    Gdiplus::FontFamily m_family;
+    Gdiplus::Font m_font;
+    Gdiplus::StringFormat m_fmt;
+};
+
+}  // namespace
+
 Gdiplus::REAL MeasureTextWidth(const CString& text, Gdiplus::REAL fontPx) {
     if (text.IsEmpty()) return 0.0f;
-    Gdiplus::Bitmap tmp(1, 1, PixelFormat32bppARGB);
-    Gdiplus::Graphics g(&tmp);
+    const TextMeasurer m(fontPx);
+    return m.Width(text);
+}
+
+Gdiplus::REAL MeasureTextLineHeight(Gdiplus::REAL fontPx) {
     Gdiplus::FontFamily family(kTextFace);
-    Gdiplus::Font font(&family, fontPx, Gdiplus::FontStyleRegular, Gdiplus::UnitPixel);
-    Gdiplus::StringFormat fmt;
-    NoWrap(fmt);
-    Gdiplus::RectF box(0.0f, 0.0f, 100000.0f, 100000.0f), out{};
-    g.MeasureString(text, text.GetLength(), &font, box, &fmt, &out);
-    return out.Width;
+    const int em = family.GetEmHeight(Gdiplus::FontStyleRegular);
+    const int pitch = family.GetLineSpacing(Gdiplus::FontStyleRegular);
+    // A face with no metrics at all still needs a pitch, and rounding up keeps
+    // the lines from overlapping into one smudge.
+    if (em <= 0 || pitch <= 0) return std::ceil(fontPx * 1.3f);
+    return std::ceil(fontPx * (Gdiplus::REAL)pitch / (Gdiplus::REAL)em);
+}
+
+std::vector<CString> WrapLines(const CString& text, Gdiplus::REAL fontPx,
+                               Gdiplus::REAL maxW) {
+    std::vector<CString> out;
+    const TextMeasurer m(fontPx);
+    const Gdiplus::REAL limit = std::max(maxW, 1.0f);
+
+    // Greedy, and never breaking inside a run of CJK: breaking Latin at a space
+    // keeps words whole, and a CJK run has no spaces to reach for, so the break
+    // goes wherever the width runs out. `breakAt` remembers the last space on
+    // the line being built, which is where the line ends when the next
+    // character no longer fits.
+    CString cur;
+    int breakAt = -1;
+    const int n = text.GetLength();
+    for (int i = 0; i <= n; ++i) {
+        const wchar_t c = i < n ? text[i] : L'\n';
+        if (c == L'\n' || c == L'\r') {
+            out.push_back(cur);
+            cur.Empty();
+            breakAt = -1;
+            if (c == L'\r' && i + 1 < n && text[i + 1] == L'\n') ++i;
+            continue;
+        }
+        const CString trial = cur + c;
+        if (cur.IsEmpty() || m.Width(trial) <= limit) {
+            cur = trial;
+            if (c == L' ') breakAt = cur.GetLength();
+            continue;
+        }
+        if (breakAt > 0) {
+            out.push_back(cur.Left(breakAt));
+            cur = cur.Mid(breakAt);
+        } else {
+            out.push_back(cur);
+            cur.Empty();
+        }
+        cur += c;
+        breakAt = c == L' ' ? cur.GetLength() : -1;
+    }
+    if (out.empty()) out.push_back(CString());
+    return out;
 }
 
 // ---------------------------------------------------------------- box shapes
@@ -107,6 +201,7 @@ void ShapeRect::Draw(Gdiplus::Graphics& g) const {
 }
 
 void ShapeEllipse::Draw(Gdiplus::Graphics& g) const {
+    const Smooth smooth(g);
     Gdiplus::Pen pen(m_ink, m_pen);
     g.DrawEllipse(&pen, m_box);
 }
@@ -217,6 +312,7 @@ void ShapeStroke::Translate(Gdiplus::REAL dx, Gdiplus::REAL dy) {
 }
 
 void ShapePen::Draw(Gdiplus::Graphics& g) const {
+    const Smooth smooth(g);
     if (m_pts.size() < 2) {
         const Gdiplus::REAL r = m_pen / 2.0f;
         Gdiplus::SolidBrush brush(m_ink);
@@ -316,17 +412,30 @@ void HeadTriangle(Gdiplus::PointF p0, Gdiplus::PointF p1, Gdiplus::REAL pen,
 }  // namespace
 
 void ShapeArrow::Draw(Gdiplus::Graphics& g) const {
-    const Gdiplus::REAL len = std::hypot(m_p1.X - m_p0.X, m_p1.Y - m_p0.Y);
+    const Gdiplus::REAL dx = m_p1.X - m_p0.X, dy = m_p1.Y - m_p0.Y;
+    const Gdiplus::REAL len = std::hypot(dx, dy);
     if (len < 0.5f) return;
+
+    const Smooth smooth(g);
 
     Gdiplus::PointF head[3], neck;
     HeadTriangle(m_p0, m_p1, m_pen, neck, head);
 
-    Gdiplus::Pen pen(m_ink, m_pen);
-    pen.SetEndCap(Gdiplus::LineCapRound);
-    g.DrawLine(&pen, m_p0, neck);
+    // The shaft is a quad that starts 2px wide and opens to the full width at
+    // the head: drawn at a constant width the arrow reads as a line with a
+    // triangle on the end, and the taper is what makes it point.
+    const Gdiplus::REAL ux = dx / len, uy = dy / len;
+    const Gdiplus::REAL tailHw = std::min(m_pen / 2.0f, 1.0f);
+    const Gdiplus::REAL headHw = m_pen / 2.0f;
+    const Gdiplus::PointF shaft[4] = {
+        Gdiplus::PointF(m_p0.X - uy * tailHw, m_p0.Y + ux * tailHw),
+        Gdiplus::PointF(neck.X - uy * headHw, neck.Y + ux * headHw),
+        Gdiplus::PointF(neck.X + uy * headHw, neck.Y - ux * headHw),
+        Gdiplus::PointF(m_p0.X + uy * tailHw, m_p0.Y - ux * tailHw),
+    };
 
     Gdiplus::SolidBrush brush(m_ink);
+    g.FillPolygon(&brush, shaft, 4);
     g.FillPolygon(&brush, head, 3);
 }
 
@@ -391,16 +500,55 @@ std::unique_ptr<Annotation> ShapeBadge::Clone() const {
 
 // --------------------------------------------------------------------- text
 
-Gdiplus::RectF ShapeText::Layout() const {
-    Gdiplus::Bitmap tmp(1, 1, PixelFormat32bppARGB);
-    Gdiplus::Graphics g(&tmp);
-    Gdiplus::FontFamily family(kTextFace);
-    Gdiplus::Font font(&family, m_fontPx, Gdiplus::FontStyleRegular, Gdiplus::UnitPixel);
-    Gdiplus::StringFormat fmt;
-    NoWrap(fmt);
-    Gdiplus::RectF box(m_at.X, m_at.Y, 100000.0f, 100000.0f), out{};
-    g.MeasureString(m_text, m_text.GetLength(), &font, box, &fmt, &out);
-    return out;
+Gdiplus::REAL ShapeText::PadX() const {
+    return (Gdiplus::REAL)std::lround((double)kTextPadX * m_dpiScale);
+}
+
+Gdiplus::REAL ShapeText::PadY() const {
+    return (Gdiplus::REAL)std::lround((double)kTextPadY * m_dpiScale);
+}
+
+Gdiplus::REAL ShapeText::LineHeight() const {
+    return MeasureTextLineHeight(m_fontPx);
+}
+
+Gdiplus::REAL ShapeText::TextWidth() const {
+    // The padding is the editor's, so the label wraps at the width the editor
+    // wrapped at rather than at the width of its own frame.
+    return std::max(m_box.Width - 2.0f * PadX(), 1.0f);
+}
+
+void ShapeText::InvalidateLayout() const {
+    m_srcW = -1.0f;
+}
+
+void ShapeText::SetText(const CString& t) {
+    m_text = t;
+    InvalidateLayout();
+}
+
+void ShapeText::AdoptBox(const Gdiplus::RectF& box) {
+    m_box = box;
+    InvalidateLayout();
+}
+
+void ShapeText::MoveHandle(int i, Gdiplus::PointF pt) {
+    BoxResize(m_box, i, pt);
+    // The box is the user's from here on: it never grows to fit the text, so a
+    // narrower box re-wraps into more lines and a shorter one hides the ones that
+    // no longer fit. The floors keep at least one line visible.
+    m_box.Width = std::max(m_box.Width, (Gdiplus::REAL)kTextMinW);
+    m_box.Height = std::max(m_box.Height, m_fontPx + PadY());
+    InvalidateLayout();
+}
+
+const std::vector<CString>& ShapeText::Lines() const {
+    if (m_srcW != m_box.Width || m_src != m_text) {
+        m_lines = WrapLines(m_text, m_fontPx, TextWidth());
+        m_src = m_text;
+        m_srcW = m_box.Width;
+    }
+    return m_lines;
 }
 
 void ShapeText::Draw(Gdiplus::Graphics& g) const {
@@ -411,15 +559,28 @@ void ShapeText::Draw(Gdiplus::Graphics& g) const {
     Gdiplus::StringFormat fmt;
     NoWrap(fmt);
     Gdiplus::SolidBrush ink(m_ink);
-    g.DrawString(m_text, m_text.GetLength(), &font, Layout(), &fmt, &ink);
+
+    // Intersect rather than replace: the caller's clip to the 选区 has to
+    // survive, or a label at the edge would spill outside it.
+    const Gdiplus::GraphicsState state = g.Save();
+    g.SetClip(m_box, Gdiplus::CombineModeIntersect);
+
+    // One DrawString per wrapped line, at the same pitch the editor used to grow
+    // its box, so committing does not move the text.
+    const Gdiplus::REAL lh = LineHeight();
+    Gdiplus::REAL y = m_box.Y;
+    for (const CString& line : Lines()) {
+        if (y + lh > m_box.Y + m_box.Height) break;
+        g.DrawString(line, line.GetLength(), &font,
+                     Gdiplus::RectF(m_box.X, y, 100000.0f, 100000.0f), &fmt, &ink);
+        y += lh;
+    }
+    g.Restore(state);
 }
 
-Gdiplus::RectF ShapeText::BBox() const { return Layout(); }
-
 bool ShapeText::HitTest(Gdiplus::PointF pt) const {
-    const Gdiplus::RectF r = Layout();
-    return pt.X >= r.X && pt.X <= r.X + r.Width && pt.Y >= r.Y &&
-           pt.Y <= r.Y + r.Height;
+    return pt.X >= m_box.X && pt.X <= m_box.X + m_box.Width &&
+           pt.Y >= m_box.Y && pt.Y <= m_box.Y + m_box.Height;
 }
 
 std::unique_ptr<Annotation> ShapeText::Clone() const {

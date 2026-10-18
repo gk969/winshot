@@ -45,6 +45,21 @@ public:
     void TouchBase();
     // Same, for a change confined to one rectangle.
     void TouchBaseIn(const CRect& r);
+    // Same, for one shape: it leaves the base from the moment it becomes the
+    // drag target, and again while the 文字 editor rewrites a label that is
+    // already committed — the editor paints its own background out of the base,
+    // so the old glyphs left in there read through as a ghost behind the text.
+    void DropFromBase(const annot::Annotation& a);
+
+    // The base pixels of `src` (this window's client coords) into `dc` at `dst`
+    // (the caller's). The inline 文字 editor is a child window and this window is
+    // WS_CLIPCHILDREN, so nothing else will ever paint under it — it has to ask
+    // for its own background, which is what the base already holds.
+    void BltBase(CDC* dc, const CRect& src, CPoint dst);
+
+    // 框外右键 brought the region back to the whole screen, so the magnifier is
+    // there to help pick a new one again.
+    void ResetPicked() { m_selPicked = false; }
 
     // Off while a modal common dialog has to sit above us; the WM_WINDOWPOS-
     // CHANGING guard below would otherwise undo the demotion itself.
@@ -104,6 +119,9 @@ private:
         DragHandle,
         // The 编辑 frame's scrollbar thumb, held down.
         ScrollThumb,
+        // A press outside a region that is already set: nothing here reacts to
+        // it, and it must not start a new region behind the user's back.
+        Ignored,
     };
 
     // The bottom of the frame: the still with the committed annotations
@@ -135,6 +153,14 @@ private:
     int HitFontRow(CPoint pt) const;
     annot::ShapeText* TextAt(CPoint pt) const;
     bool ResolvePopup(CPoint pt);
+    // A press here is outside a region the user already picked, away from its
+    // grips: nothing on the canvas answers to it.
+    bool OutsideRegion(CPoint pt) const;
+    // The three ways the region changes, each with the drawings kept inside it:
+    // the region may never be moved or resized so that ink falls outside.
+    void MoveSelTo(RECT r);
+    void ResizeSel(SelHandle h, POINT pt);
+    void NudgeSel(int dx, int dy, bool resizeEdges);
     void ApplyCursor(CPoint pt);
     int HandleRadius() const;
     int AnnoHandleRadius() const;
@@ -158,8 +184,10 @@ private:
     // the base while it moves, so it follows the cursor instead of being redrawn
     // at its old place under the dim.
     annot::Annotation* MovingAnno() const;
-    // Takes a shape out of the base at the moment it becomes the drag target.
-    void DropFromBase(const annot::Annotation& a);
+    // The one shape DrawBase leaves out: the drag target, or failing that the
+    // label the 文字 editor is rewriting. Never both — typing into a box and
+    // dragging a shape are not the same gesture.
+    annot::Annotation* SkipAnno() const;
     std::unique_ptr<Gdiplus::Font> UiFont(int px) const;
 
     CaptureSession* m_session = nullptr;

@@ -31,9 +31,14 @@ private:
     std::vector<std::unique_ptr<Annotation>> m_items;
 };
 
+// The half-side of one selection marker for this shape. `base` is the overlay's
+// DPI-scaled default; a shape that has a stroke grows its markers with it, and
+// the two kinds whose handles sit on a box the user can already see take half.
+Gdiplus::REAL HandleSize(const Annotation& a, Gdiplus::REAL base);
+
 // Selection chrome, per 矩形-点击已画矩形.png and
 // 椭圆-点击已画椭圆可调整大小位置.png: a thin red box where the shape does not
-// draw its own, and a white-cored red ring on every handle.
-void DrawSelection(Gdiplus::Graphics& g, const Annotation& a, Gdiplus::REAL radius);
+// draw its own, and a white-cored red square on every handle.
+void DrawSelection(Gdiplus::Graphics& g, const Annotation& a, Gdiplus::REAL base);
 
 }  // namespace annot

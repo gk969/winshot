@@ -399,6 +399,12 @@ void COverlayWnd::TouchBaseIn(const CRect& r) {
     InvalidatePart(r);
 }
 
+void COverlayWnd::BltBase(CDC* dc, const CRect& src, CPoint dst) {
+    if (!m_base.dc || src.IsRectEmpty() || !dc) return;
+    ::BitBlt(dc->GetSafeHdc(), dst.x, dst.y, src.Width(), src.Height(),
+             m_base.dc, src.left, src.top, SRCCOPY);
+}
+
 // An in-place drag draws its shape in the chrome instead of under the dim, so
 // the base has to stop drawing it the moment the drag starts. Without this the
 // old position sits under the moving copy for the whole drag and only goes away
@@ -605,7 +611,7 @@ void COverlayWnd::DrawBase(Gdiplus::Graphics& g) {
     // outside the selection still gets dimmed below, and the export crops it.
     // The 编辑 frame is the exception — it never moves, and the page has to stop
     // at its edges.
-    m_session->Annos().DrawAll(g, MovingAnno());
+    m_session->Annos().DrawAll(g, SkipAnno());
     if (clipped) g.Restore(st);
 }
 
@@ -614,11 +620,45 @@ void COverlayWnd::DrawBase(Gdiplus::Graphics& g) {
 // buffer instead of the whole update region — 3.5M pixels of clear and blend to
 // move ink that fits in two cards, a ring and a magnifier.
 namespace {
+
+// The pixels a rect really covers under PixelOffsetModeNone: pixel i is sampled
+// at its own top-left corner, so the run is [ceil(X), ceil(X+W)). Rounding the
+// same rect down for the clear and up for the blend — which is what this did
+// first — leaves one column and one row of the previous frame's ink standing
+// inside the rect that then gets blended: the fringe above and to the left of a
+// moving shape.
+CRect Covered(Gdiplus::RectF r) {
+    return CRect((int)std::ceil(r.X), (int)std::ceil(r.Y),
+                 (int)std::ceil(r.X + r.Width), (int)std::ceil(r.Y + r.Height));
+}
+
+// Filling an integer rect with integer coordinates covers exactly those pixels,
+// which is what makes the clear and the blend agree pixel for pixel.
+void FillPixels(Gdiplus::Graphics& g, const CRect& q, const Gdiplus::Brush& b) {
+    g.FillRectangle(&b, (Gdiplus::REAL)q.left, (Gdiplus::REAL)q.top,
+                    (Gdiplus::REAL)q.Width(), (Gdiplus::REAL)q.Height());
+}
+
+// The current clip as pixels. Every clip here is a rectangle, so its bounds are
+// the clip; false when the clip is unbounded, which reports a sentinel too wide
+// to fit an int.
+bool ClipPixels(Gdiplus::Graphics& g, CRect* out) {
+    Gdiplus::Region rgn;
+    Gdiplus::RectF b;
+    if (g.GetClip(&rgn) != Gdiplus::Ok) return false;
+    if (rgn.GetBounds(&b, &g) != Gdiplus::Ok) return false;
+    if (b.X < -1e7f || b.Y < -1e7f || b.Width > 1e7f || b.Height > 1e7f)
+        return false;
+    *out = Covered(b);
+    return true;
+}
+
 // Where an annotation can put ink down, plus the ring of selection handles drawn
-// around it.
+// around it. InkBBox rather than BBox: an anti-aliased stroke feathers about a
+// pixel past the geometric outline, and ink the clear misses is ink that stays.
 Gdiplus::RectF InkedBox(const annot::Annotation* a, Gdiplus::REAL pad) {
     if (!a) return Gdiplus::RectF(0, 0, 0, 0);
-    const Gdiplus::RectF b = a->BBox();
+    const Gdiplus::RectF b = a->InkBBox();
     return Gdiplus::RectF(b.X - pad, b.Y - pad, b.Width + 2 * pad,
                           b.Height + 2 * pad);
 }
@@ -639,14 +679,22 @@ public:
         // through as a ghost. SourceCopy with a transparent colour zeroes alpha
         // along with the colour, which is what drops the untouched pixels of the
         // rect out of the blend.
+        //
+        // What gets cleared, what gets blended and what the clip lets the
+        // element ink have to be the same set of pixels: the clip is read back
+        // and intersected here so a rect that reaches past it cannot carry
+        // stale ink from the part the fill never reached.
+        CRect q = Covered(r);
+        CRect clip;
+        if (ClipPixels(g, &clip)) q.IntersectRect(&q, &clip);
+        if (q.IsRectEmpty()) return;
+
         const Gdiplus::CompositingMode cm = g.GetCompositingMode();
         g.SetCompositingMode(Gdiplus::CompositingModeSourceCopy);
         Gdiplus::SolidBrush clear(0x00000000);
-        g.FillRectangle(&clear, r.X, r.Y, r.Width, r.Height);
+        FillPixels(g, q, clear);
         g.SetCompositingMode(cm);
-        ink->push_back(CRect((int)std::floor(r.X), (int)std::floor(r.Y),
-                             (int)std::ceil(r.X + r.Width),
-                             (int)std::ceil(r.Y + r.Height)));
+        ink->push_back(q);
     }
     ~ClipTo() { m_g.Restore(m_state); }
 
@@ -678,16 +726,18 @@ public:
             Gdiplus::RectF(ol, it, il - ol, ib - it),
             Gdiplus::RectF(ir, it, orr - ir, ib - it),
         };
+        CRect clip;
+        const bool bounded = ClipPixels(g, &clip);
         const Gdiplus::CompositingMode cm = g.GetCompositingMode();
         g.SetCompositingMode(Gdiplus::CompositingModeSourceCopy);
         Gdiplus::SolidBrush clear(0x00000000);
         for (const Gdiplus::RectF& q : strip) {
             if (q.Width <= 0.0f || q.Height <= 0.0f) continue;
-            g.FillRectangle(&clear, q.X, q.Y, q.Width, q.Height);
-            if (ink)
-                ink->push_back(CRect((int)std::floor(q.X), (int)std::floor(q.Y),
-                                     (int)std::ceil(q.X + q.Width),
-                                     (int)std::ceil(q.Y + q.Height)));
+            CRect px = Covered(q);
+            if (bounded) px.IntersectRect(&px, &clip);
+            if (px.IsRectEmpty()) continue;
+            FillPixels(g, px, clear);
+            if (ink) ink->push_back(px);
         }
         g.SetCompositingMode(cm);
     }
@@ -838,6 +888,10 @@ annot::Annotation* COverlayWnd::MovingAnno() const {
                                                                     : nullptr;
 }
 
+annot::Annotation* COverlayWnd::SkipAnno() const {
+    return MovingAnno() ? MovingAnno() : m_session->EditingAnno();
+}
+
 std::unique_ptr<Gdiplus::Font> COverlayWnd::UiFont(int px) const {
     Gdiplus::FontFamily family(kFontFace);
     return std::make_unique<Gdiplus::Font>(
@@ -848,7 +902,10 @@ std::unique_ptr<Gdiplus::Font> COverlayWnd::UiFont(int px) const {
 
 CRect COverlayWnd::AnnoRect(const annot::Annotation* a) {
     if (!a) return CRect(0, 0, 0, 0);
-    const Gdiplus::RectF b = a->BBox();
+    // InkBBox, not BBox: over-invalidating costs a few more pixels of repaint,
+    // while missing the anti-aliased fringe or the outer half of a pen leaves
+    // them on screen.
+    const Gdiplus::RectF b = a->InkBBox();
     return CRect((int)std::floor(b.X), (int)std::floor(b.Y),
                  (int)std::ceil(b.X + b.Width), (int)std::ceil(b.Y + b.Height));
 }
@@ -1296,7 +1353,14 @@ int COverlayWnd::AnnoHandleRadius() const {
 }
 
 int COverlayWnd::HitAnnoHandle(const annot::Annotation& a, CPoint pt) const {
-    const Gdiplus::REAL r = (Gdiplus::REAL)(AnnoHandleRadius() + 2);
+    // The grab area is not the marker. An ellipse's or a label's marker draws at
+    // half the default and still has to be catchable, while the big markers a
+    // thick rect or arrow draws have to be catchable whole — so the floor stays
+    // at the old radius plus 2 and only ever grows from there.
+    const Gdiplus::REAL drawn =
+        annot::HandleSize(a, (Gdiplus::REAL)AnnoHandleRadius());
+    const Gdiplus::REAL r =
+        (std::max)((Gdiplus::REAL)(AnnoHandleRadius() + 2), drawn + 2.0f);
     for (int i = 0; i < a.HandleCount(); ++i) {
         const Gdiplus::PointF c = a.HandleAt(i);
         if (std::hypot((double)pt.x - c.X, (double)pt.y - c.Y) <= r) return i;
@@ -1344,6 +1408,60 @@ void COverlayWnd::ScrollToThumb(CPoint pt) {
     m_session->ScrollLongShot(
         MulDiv(m_session->LongShotMaxScroll(), y - track.top, travel) -
         m_session->LongShotScroll());
+}
+
+namespace {
+// The box everything drawn on the canvas covers, in client px; empty when there
+// is nothing on it. InkBBox rather than BBox — the anti-aliased fringe and the
+// outer half of a pen are ink the region has to keep holding.
+RECT InkBounds(const annot::AnnotationList& annos) {
+    RECT box = {};
+    for (size_t i = 0; i < annos.Count(); ++i) {
+        const annot::Annotation* a = annos.At(i);
+        if (!a) continue;
+        const Gdiplus::RectF b = a->InkBBox();
+        const RECT r{ (int)std::floor(b.X), (int)std::floor(b.Y),
+                      (int)std::ceil(b.X + b.Width),
+                      (int)std::ceil(b.Y + b.Height) };
+        if (IsRectEmpty(&box)) box = r;
+        else UnionRect(&box, &box, &r);
+    }
+    return box;
+}
+}  // namespace
+
+bool COverlayWnd::OutsideRegion(CPoint pt) const {
+    // While the region is still the whole screen there is no outside to be
+    // outside of.
+    const SelectionModel& sel = m_session->Sel();
+    if (sel.IsDefault()) return false;
+    const POINT p{ pt.x, pt.y };
+    if (sel.Contains(p)) return false;
+    return sel.HitTest(p, HandleRadius()) == SelHandle::None;
+}
+
+void COverlayWnd::MoveSelTo(RECT r) {
+    SelectionModel& sel = m_session->Sel();
+    const RECT keep = InkBounds(m_session->Annos());
+    sel.SetKeepIn(&keep);
+    sel.MoveTo(r);
+    sel.SetKeepIn(nullptr);
+}
+
+void COverlayWnd::ResizeSel(SelHandle h, POINT pt) {
+    SelectionModel& sel = m_session->Sel();
+    const RECT keep = InkBounds(m_session->Annos());
+    sel.SetKeepIn(&keep);
+    sel.Resize(h, pt);
+    sel.SetKeepIn(nullptr);
+}
+
+void COverlayWnd::NudgeSel(int dx, int dy, bool resizeEdges) {
+    SelectionModel& sel = m_session->Sel();
+    const RECT keep = InkBounds(m_session->Annos());
+    sel.SetKeepIn(&keep);
+    sel.Nudge(dx, dy, resizeEdges);
+    sel.SetKeepIn(nullptr);
 }
 
 void COverlayWnd::OnLButtonDown(UINT, CPoint pt) {
@@ -1434,8 +1552,14 @@ void COverlayWnd::OnLButtonDown(UINT, CPoint pt) {
         } else if (m_session->LongShotEdit()) {
             // The frame is a viewport and it is fixed: a press that neither grabs
             // ink nor arms a shape has nothing to do.
-        } else if (!sel.IsDefault() && sel.Contains(POINT{ pt.x, pt.y })) {
-            m_mode = Mode::Moving;
+        } else if (!sel.IsDefault() && !tb::IsTool(tool)) {
+            // The region is already picked, so outside it there is nothing this
+            // press could work on: dragging a new one there was a way to lose the
+            // one you had. Inside, it moves the region. A drawing tool armed is
+            // the exception — there the press is the first point of a stroke, and
+            // a stroke that starts outside is held at the frame.
+            m_mode = sel.Contains(POINT{ pt.x, pt.y }) ? Mode::Moving
+                                                       : Mode::Ignored;
         } else {
             m_mode = Mode::Creating;
             m_selPicked = true;
@@ -1454,6 +1578,13 @@ void COverlayWnd::OnLButtonDblClk(UINT nFlags, CPoint pt) {
 
     annot::ShapeText* t = TextAt(pt);
     if (!t) {
+        // 框外双击: the capture is over. Outside a region that is already picked
+        // there is nothing else a double click could mean, and the first press of
+        // it did nothing either.
+        if (OutsideRegion(pt) && !tb::IsTool(m_session->ActiveTool())) {
+            m_session->Finish(false);
+            return;
+        }
         OnLButtonDown(nFlags, pt);
         return;
     }
@@ -1491,14 +1622,14 @@ void COverlayWnd::OnMouseMove(UINT, CPoint pt) {
         int dx = pt.x - m_dragStart.x;
         int dy = pt.y - m_dragStart.y;
         r.left += dx; r.top += dy; r.right += dx; r.bottom += dy;
-        sel.MoveTo(r);
+        MoveSelTo(r);
         LayoutChrome();
         InvalidateSelChange(before);
         break;
     }
     case Mode::Sizing: {
         const RECT before = sel.Rect();
-        sel.Resize(m_handle, POINT{ pt.x, pt.y });
+        ResizeSel(m_handle, POINT{ pt.x, pt.y });
         LayoutChrome();
         InvalidateSelChange(before);
         break;
@@ -1568,6 +1699,8 @@ void COverlayWnd::OnMouseMove(UINT, CPoint pt) {
     case Mode::ScrollThumb:
         ScrollToThumb(pt);
         break;
+    case Mode::Ignored:
+        break;
     case Mode::Idle:
         CursorMoved();
         break;
@@ -1581,7 +1714,14 @@ void COverlayWnd::OnLButtonUp(UINT, CPoint) {
     if (InLongShot()) return;
     if (m_mode == Mode::Creating) {
         SelectionModel& sel = m_session->Sel();
-        if (sel.Width() < 3 || sel.Height() < 3) sel.Set(m_prevRect);
+        if (sel.Width() < 3 || sel.Height() < 3) {
+            sel.Set(m_prevRect);
+            // A press without a drag is still a decision: the region is the whole
+            // screen, and it is now picked. The next press moves it or draws in
+            // it instead of starting the same gesture over, which is what makes
+            // the first click on the dimmed desktop do something.
+            sel.MarkPicked();
+        }
     } else if (m_mode == Mode::Drawing) {
         if (m_pending) {
             m_pending->Commit();
@@ -1624,10 +1764,18 @@ void COverlayWnd::OnLButtonUp(UINT, CPoint) {
 // its own context menu under a hand that had just asked for a screenshot.
 void COverlayWnd::OnRButtonDown(UINT, CPoint) {}
 
-void COverlayWnd::OnRButtonUp(UINT, CPoint) {
+void COverlayWnd::OnRButtonUp(UINT, CPoint pt) {
     if (InLongShot()) return;
-    if (m_session->Sel().IsDefault() && m_session->Annos().Count() == 0)
+    if (m_session->Sel().IsDefault() && m_session->Annos().Count() == 0) {
         m_session->Accept();
+        return;
+    }
+    // 框外右键: everything since the hotkey opened is withdrawn — the drawings,
+    // the history that could bring them back, the armed tool, and the region,
+    // which goes back to the whole screen with the magnifier. The 编辑 frame is
+    // a viewport rather than a picked region, so it is not what this cancels.
+    if (OutsideRegion(pt) && !m_session->LongShotEdit())
+        m_session->ResetCanvas();
 }
 
 void COverlayWnd::OnRButtonDblClk(UINT, CPoint) {}
@@ -1637,8 +1785,12 @@ void COverlayWnd::OnRButtonDblClk(UINT, CPoint) {}
 // either.
 void COverlayWnd::OnContextMenu(CWnd*, CPoint) {}
 
-// Windows sends the wheel to the focus window, and in 长截图 that is us rather
-// than the window the hole is showing. Pass it on to whatever is underneath.
+// The wheel goes to whatever the cursor is over, so inside the hole it normally
+// reaches the page without ever coming here — and the low-level hook in the
+// long-shot controller is what refuses a notch that gets ahead of the stitcher.
+// This handler is the fallback for when hover-scrolling is switched off and the
+// message comes to the focus window instead; the notch is already accounted for
+// by then, so pass it on and leave the allowance alone.
 BOOL COverlayWnd::OnMouseWheel(UINT nFlags, short zDelta, CPoint pt) {
     // 长截图 编辑: the page is taller than the frame that shows it, and the
     // wheel is how the rest of it is reached. Any pointer position counts — the
@@ -1731,15 +1883,11 @@ BOOL COverlayWnd::OnSetCursor(CWnd*, UINT, UINT) {
         // from the ink on it the pointer is only a pointer.
         else if (m_session->LongShotEdit())
             id = IDC_ARROW;
-        // Around the frame, away from its corners and edge midpoints, the whole
-        // region is what moves. That band reaches outside the frame too, where a
-        // press would otherwise do nothing; a region still covering the whole
-        // screen has nothing to move, so it keeps the arrow.
-        else if (!sel.IsDefault() && sel.NearFrame(p, Dpi::S(GetSafeHwnd(), 10)))
-            id = IDC_SIZEALL;
         // With no tool armed a press anywhere inside a region the user picked
         // moves that region, so the pointer says so across the whole of it and
-        // not only near the edge.
+        // not only near the edge. Outside the frame a press does nothing at all,
+        // and the arrow below is what says so; the grips on the frame were
+        // claimed above, so they keep their resize cursors out there.
         else if (!sel.IsDefault() && sel.Contains(p))
             id = IDC_SIZEALL;
         else
@@ -1817,7 +1965,7 @@ void COverlayWnd::OnKeyDown(UINT nChar, UINT nRepCnt, UINT nFlags) {
         return;
     }
 
-    m_session->Sel().Nudge(dx, dy, false);
+    NudgeSel(dx, dy, false);
     LayoutChrome();
     Invalidate();
 }
