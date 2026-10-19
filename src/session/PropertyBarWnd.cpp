@@ -297,7 +297,7 @@ void CPropertyBarWnd::OnPaint() {
 
             Gdiplus::SolidBrush accent(tb::kAccent);
             for (int i = 0; i < 3; ++i) {
-                const int d = Dpi::S(GetSafeHwnd(), tb::kDotSizes[i]);
+                const int d = Dpi::S(GetSafeHwnd(), tb::kDotDraw[i]);
                 const int cx = DotCentre(i);
                 g.FillEllipse(&accent, (Gdiplus::REAL)(cx - d / 2),
                               (Gdiplus::REAL)((m_h - d) / 2), (Gdiplus::REAL)d, (Gdiplus::REAL)d);

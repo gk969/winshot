@@ -3,46 +3,63 @@
 namespace annot { class ShapeText; }
 class CaptureSession;
 
-// The edit itself. Enter commits and Esc cancels, which ES_WANTRETURN alone
-// cannot do — it only stops the dialog manager from eating the key.
+// The caret, the text selection and the IME. Enter inserts a newline, Ctrl+Enter
+// commits and Esc cancels, which ES_WANTRETURN alone cannot do — it only stops
+// the dialog manager from eating the key.
 class CTextEditBox : public CEdit {
+public:
+    // The second click of the double-click that opened the edit lands on a
+    // control that has only just been created, and the control then puts the
+    // caret where it was clicked rather than at the end of the text. One-shot, so
+    // the next click is the user aiming somewhere on purpose.
+    void PlaceCaretAtEnd() { m_placeAtEnd = true; }
+
 protected:
     DECLARE_MESSAGE_MAP()
     afx_msg void OnChar(UINT nChar, UINT nRepCnt, UINT nFlags);
+    afx_msg void OnLButtonUp(UINT nFlags, CPoint pt);
+
+private:
+    bool m_placeAtEnd = false;
 };
 
-// The inline editor for the 文字 tool. A real edit control rather than a hand
-// drawn caret: the IME then paints its own composition string inside the box and
-// parks its candidate window at the caret, which is exactly what
-// 文字-点击位置-输入时红色文本框.png shows. The red frame is the overlay's job.
+// The 文字 tool's input surface. It owns no geometry and draws no text of its
+// own: it is a transparent edit control placed inside the label's box, which is
+// the only box on screen — the red frame and the eight square markers are drawn
+// by the overlay from the same rect the label carries, so re-editing a label
+// opens on the box it was left on and dragging a handle moves the text with it.
+// A real edit control rather than a hand drawn caret because the IME then paints
+// its own composition string inside the box and parks its candidate window at
+// the caret, which is what 文字-点击位置-输入时红色文本框.png shows.
 //
 // The box follows the 选区 rather than the screen: it grows right until the
-// frame's right edge, then wraps into more lines, and it stops growing down at
-// the frame's bottom edge.
+// frame's right edge while the text has no width of its own, then wraps into
+// more lines, and it stops growing down at the frame's bottom edge.
 class CTextEditor : public CWnd {
 public:
-    // `at` is the press point in overlay-client px. `target` is the annotation
-    // being re-edited, or null when a new one is being typed.
-    BOOL Create(CWnd* parent, CaptureSession* session, CPoint at,
-                const CString& text, int fontPx, Gdiplus::Color ink,
-                COLORREF back, annot::ShapeText* target);
+    // `label` is the annotation being typed into; it already carries the box the
+    // editor opens on. `back` is the colour the fallback brush uses.
+    BOOL Create(CWnd* parent, CaptureSession* session, annot::ShapeText* label,
+                COLORREF back);
     ~CTextEditor();
-
-    // The box the overlay strokes in red, in overlay-client px.
-    CRect Frame() const;
 
     // Ends the edit. Safe from a notification handler of this window, because it
     // only posts — the overlay does the teardown.
     void Finish(bool commit);
 
-    annot::ShapeText* Target() const { return m_target; }
-    CPoint At() const { return m_at; }
+    annot::ShapeText* Label() const { return m_label; }
     int FontPx() const { return m_fontPx; }
     Gdiplus::Color Ink() const { return m_ink; }
     CString Text() const;
 
-    // False when `text` would need more room below the press point than the
-    // 选区 has. The box cannot scroll, so a change that does not fit is refused.
+    // Moves this window onto the label's box and re-samples the pixels behind it.
+    // Called when the edit opens and after every move or resize of the label, so
+    // the caret and the typed glyphs always sit where the committed label will
+    // draw them.
+    void SyncToBox();
+
+    // False when `text` would need more room below the box than the 选区 has. The
+    // box cannot scroll, so a change that does not fit is refused.
     bool FitsText(const CString& text) const;
 
 private:
@@ -52,14 +69,16 @@ private:
     afx_msg void OnEnKillFocus();
     afx_msg void OnEnChange();
 
-    // The edit grows with what is typed, as the reference box does, up to the
-    // frame's right edge; past it the text wraps and the box grows down.
-    void FitToText();
-    // The 选区, in the parent's client space, clipped to what we can draw on.
+    // The 选区, in the parent's client space — the same space this window lives
+    // in. The frame is what the text must stay inside, not the screen.
     CRect Limit() const;
-    // The box `text` needs: as wide as the text up to `maxW`, then one line
-    // pitch per wrapped line.
-    CSize BoxFor(const CString& text, int maxW) const;
+    // The label's box grown to hold `text`: never narrower or shorter than it is
+    // now, wider only while the text has no width of its own, and never past the
+    // 选区's right or bottom edge.
+    Gdiplus::RectF BoxFor(const CString& text) const;
+    // How tall a box `width` wide has to be to show all of `text`. BoxFor caps at
+    // the 选区, so this is what says whether the cap bit.
+    Gdiplus::REAL NeededHeight(const CString& text, Gdiplus::REAL width) const;
     // The base pixels behind this window, as a tile for the inner edit. The
     // overlay is WS_CLIPCHILDREN and never paints under a child, so the edit has
     // to carry its own background or it shows an opaque swatch instead.
@@ -73,8 +92,7 @@ private:
     HBITMAP m_backBmp = nullptr;
     CFont m_font;
     CaptureSession* m_session = nullptr;
-    annot::ShapeText* m_target = nullptr;
-    CPoint m_at = { 0, 0 };
+    annot::ShapeText* m_label = nullptr;
     int m_fontPx = 18;
     Gdiplus::Color m_ink;
     COLORREF m_backColor = RGB(255, 255, 255);

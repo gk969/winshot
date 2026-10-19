@@ -788,9 +788,18 @@ void COverlayWnd::DrawChrome(Gdiplus::Graphics& g) {
     }
     if (any) {
         ClipTo c(g, Gdiplus::RectF(il, it, ir - il, ib - it), &m_chromeInk);
-        if (moving) moving->Draw(g);
+        // The label being typed into draws no ink of its own while the edit is
+        // open, even while it is being dragged: the input control sits on its box
+        // and shows the text, so drawing the committed glyphs too is the double
+        // image 文本框双击编辑 shows. The control follows the box as it moves.
+        if (moving && moving != m_session->EditingAnno()) moving->Draw(g);
         if (m_pending) m_pending->Draw(g);
-        if (sel) annot::DrawSelection(g, *sel, (Gdiplus::REAL)AnnoHandleRadius());
+        // Under the markers, so a corner marker reads as one square rather than
+        // as a square with a line run through it.
+        DrawEditFrame(g);
+        if (sel)
+            annot::DrawSelection(g, *sel, (Gdiplus::REAL)AnnoHandleRadius(),
+                                 HasMarkers(*sel));
     }
     g.Restore(gs);
     ProbeMark(4);
@@ -815,7 +824,6 @@ void COverlayWnd::DrawChrome(Gdiplus::Graphics& g) {
         }
     }
     DrawSizeLabel(g);
-    DrawEditFrame(g);
     DrawFontDropdown(g);
     ProbeMark(5);
     DrawScrollBar(g);
@@ -1079,20 +1087,19 @@ void COverlayWnd::TipChanged(const CPoint* anchor) {
     m_tipWnd->Show(tip->text, at, limit);
 }
 
-// 文字-点击位置-输入时红色文本框.png: the live edit is a bare CEdit and the
-// parent strokes a red frame 2px outside it.
+// 文字-点击位置-输入时红色文本框.png: the label's box carries a red frame 2px
+// outside it, in the selected state and in the editing state alike — the frame is
+// what says the text is a box, and the eight square markers on it are what says
+// whether it can be resized. Called from inside the selection chrome's clip,
+// which clears this same rect: a ClipTo of its own would drop the markers.
 void COverlayWnd::DrawEditFrame(Gdiplus::Graphics& g) {
-    const CTextEditor* ed = m_session->Editor();
-    if (!ed) return;
+    annot::ShapeText* t = FrameText();
+    if (!t) return;
 
-    CRect r = ed->Frame();
-    const int pad = Dpi::S(GetSafeHwnd(), 2);
-    r.InflateRect(pad, pad);
-    ClipTo frame(g, Gdiplus::RectF((Gdiplus::REAL)(r.left - 1),
-                                   (Gdiplus::REAL)(r.top - 1),
-                                   (Gdiplus::REAL)(r.Width() + 2),
-                                   (Gdiplus::REAL)(r.Height() + 2)),
-                        &m_chromeInk);
+    const Gdiplus::RectF b = t->Box();
+    CRect r((int)b.X, (int)b.Y, (int)std::ceil(b.X + b.Width),
+            (int)std::ceil(b.Y + b.Height));
+    r.InflateRect(Dpi::S(GetSafeHwnd(), 2), Dpi::S(GetSafeHwnd(), 2));
 
     Gdiplus::Pen pen(kEditFrame, 1.0f);
     g.DrawRectangle(&pen, (Gdiplus::REAL)r.left + 0.5f, (Gdiplus::REAL)r.top + 0.5f,
@@ -1352,7 +1359,22 @@ int COverlayWnd::AnnoHandleRadius() const {
     return Dpi::S(GetSafeHwnd(), 5);
 }
 
+bool COverlayWnd::HasMarkers(const annot::Annotation& a) const {
+    return a.GetKind() != annot::Kind::Text || &a == m_session->EditingAnno();
+}
+
+annot::ShapeText* COverlayWnd::FrameText() const {
+    annot::Annotation* a = m_session->Selected();
+    return a && a->GetKind() == annot::Kind::Text
+               ? static_cast<annot::ShapeText*>(a)
+               : nullptr;
+}
+
 int COverlayWnd::HitAnnoHandle(const annot::Annotation& a, CPoint pt) const {
+    // A grab for a marker that was never drawn would offer a resize the cursor
+    // never showed: a label that is not being edited moves as a whole.
+    if (!HasMarkers(a)) return -1;
+
     // The grab area is not the marker. An ellipse's or a label's marker draws at
     // half the default and still has to be catchable, while the big markers a
     // thick rect or arrow draws have to be catchable whole — so the floor stays
@@ -1388,8 +1410,16 @@ bool COverlayWnd::ResolvePopup(CPoint pt) {
         return true;
     }
     if (m_session->Editor()) {
-        // Anywhere outside the edit commits it. The press is swallowed so the
-        // click that commits does not also start a shape underneath.
+        // The input control covers the box's inside, so a press the overlay sees
+        // near the box is on its markers or its frame line: that resizes or moves
+        // the box being typed into, so the edit stays open and the press runs as
+        // the drag it looks like. Anywhere else the press commits the edit and is
+        // swallowed, so the click that commits does not also start a shape.
+        annot::ShapeText* t = m_session->Editor()->Label();
+        if (t && (t->HitTest(Gdiplus::PointF((Gdiplus::REAL)pt.x,
+                                             (Gdiplus::REAL)pt.y)) ||
+                  HitAnnoHandle(*t, pt) >= 0))
+            return false;
         m_session->EndTextEdit(true);
         return true;
     }
@@ -1540,8 +1570,9 @@ void COverlayWnd::OnLButtonDown(UINT, CPoint pt) {
             // A press on bare canvas with the text tool arms a new label; one on
             // existing ink was handled above, so a label can always be picked up
             // again. Re-editing stays on the double click, as in 文字-双击编辑.png.
+            // The call selects the label it just added — the box on screen while
+            // typing is that label's own, frame and markers included.
             m_session->BeginTextEdit(pt, nullptr);
-            m_session->Select(-1);
         } else if ((m_pending = annot::MakeShape(
                         tool, Gdiplus::PointF((Gdiplus::REAL)pt.x,
                                               (Gdiplus::REAL)pt.y),
@@ -1673,6 +1704,9 @@ void COverlayWnd::OnMouseMove(UINT, CPoint pt) {
             m_dragStart.x += (LONG)ax;
             m_dragStart.y += (LONG)ay;
             InvalidateAnnoChange(m_anno, before);
+            // Typing into a label and dragging it are the same object now, so the
+            // caret and the glyphs have to come along with the box.
+            m_session->SyncEditor();
         }
         break;
     case Mode::DragHandle:
@@ -1694,6 +1728,9 @@ void COverlayWnd::OnMouseMove(UINT, CPoint pt) {
                     m_anno->MoveHandle(m_annoHandle, cand);
             }
             InvalidateAnnoChange(m_anno, before);
+            // A resize re-wraps the text, so the input surface follows the new
+            // box rather than leaving the caret behind in the old one.
+            m_session->SyncEditor();
         }
         break;
     case Mode::ScrollThumb:
@@ -1858,6 +1895,23 @@ BOOL COverlayWnd::OnSetCursor(CWnd*, UINT, UINT) {
         if (annot::Annotation* a = m_session->Selected()) {
             const int hi = HitAnnoHandle(*a, pt);
             if (hi >= 0) id = kBoxCursors[hi];
+        }
+        // Inside the text of the label being edited, a press puts the caret there.
+        // The input control's class cursor is the I-beam, but MFC hands a child's
+        // WM_SETCURSOR to the parent, so that cursor never runs and the overlay has
+        // to answer for it — over the control's own rectangle and no further, since
+        // the ring between it and the box edge is a press on the box, not in the
+        // text.
+        if (!id) {
+            if (annot::Annotation* e = m_session->EditingAnno();
+                e && e->GetKind() == annot::Kind::Text) {
+                annot::ShapeText* t = static_cast<annot::ShapeText*>(e);
+                const Gdiplus::RectF b = t->Box();
+                const Gdiplus::REAL pad = t->PadX();
+                if (pt.x >= b.X + pad && pt.x < b.X + b.Width - pad &&
+                    pt.y >= b.Y + pad && pt.y < b.Y + b.Height - pad)
+                    id = IDC_IBEAM;
+            }
         }
         // The 画笔 and 马赛克 press is a stroke even on top of old ink, so the
         // move cursor would promise a move that does not happen.

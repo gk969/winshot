@@ -163,7 +163,11 @@ if (-not $at) { 'FAIL: the rectangle was never drawn'; exit 1 }
 # The pointer goes to 2600,1900, more than 1000px beyond the frame in both axes.
 Drag ([int]($at.l + ($at.r - $at.l) / 4)) $at.t 2600 1900 60
 $s = Grab 'D:\Project\winshot\obj\clamp_br.png'
-$br = Ink-Box $s 1150 850 1600 1150
+# The window hugs the corner the element has to reach. Its left edge matters
+# more than it looks: the box this finds is where the next drag presses, and the
+# still under the frame carries the desktop's own red, which a window wide
+# enough to include it reports as the box's left edge 140px early.
+$br = Ink-Box $s 1330 880 1600 1120
 $s.Dispose()
 if (-not $br) {
     $fail += 'dragging the rectangle past the bottom-right corner lost it entirely'
@@ -186,7 +190,7 @@ if (-not $br) {
 if ($br) {
     Drag ([int]($br.l + ($br.r - $br.l) / 4)) $br.t 100 100 60
     $s = Grab 'D:\Project\winshot\obj\clamp_tl.png'
-    $tl = Ink-Box $s 740 540 1050 850
+    $tl = Ink-Box $s 760 560 1000 760
     $s.Dispose()
     if (-not $tl) {
         $fail += 'dragging the rectangle past the top-left corner lost it entirely'

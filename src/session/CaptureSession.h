@@ -62,11 +62,16 @@ public:
     void ResetCanvas();
 
     // The 文字 tool's inline editor. It lives here rather than on the overlay so
-    // the toolbar, the property bar and the overlay can all reach it; the
-    // overlay only draws the red frame around Editor()->Frame().
+    // the toolbar, the property bar and the overlay can all reach it. `target`
+    // null means a fresh label, which is added to the list at `at` before the
+    // edit opens: the box on screen while typing is the label's own, so there is
+    // one geometry and dragging a handle while editing moves the text with it.
     void BeginTextEdit(CPoint at, annot::ShapeText* target = nullptr);
     void EndTextEdit(bool commit);
     CTextEditor* Editor() const { return m_editor.get(); }
+    // Follow the input surface onto the label's box, after a move or a resize of
+    // it. The label owns the geometry; the editor only sits inside it.
+    void SyncEditor();
     // The label the editor is rewriting, or null for a fresh one. The overlay
     // leaves it out of its cached canvas for the whole edit: the editor paints
     // its own background out of that canvas, so the committed glyphs left in
@@ -178,6 +183,11 @@ private:
     int m_selIdx = -1;
     std::unique_ptr<CTextEditor> m_editor;
     annot::Annotation* m_editSkip = nullptr;
+    // The label as the edit found it, for ESC and for a cancel that throws away
+    // a label nothing was typed into.
+    std::unique_ptr<annot::Annotation> m_editBefore;
+    // Index into m_annos of the label this edit created, or -1 for a re-edit.
+    int m_newText = -1;
     bool m_ocrBusy = false;
     // 长截图 编辑: the still is a stitched document taller than the frame that
     // shows it, and m_lsScroll is how many of its rows are above the top edge.

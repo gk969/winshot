@@ -7,9 +7,9 @@
 # Three measurements of one inset box, the label's own:
 #   A  the label as committed, editor closed - the ink the box is meant to hold,
 #      and the positive control: it proves the box does contain measurable ink.
-#   B  the editor open over it with all but two characters deleted - the box has
-#      to be nearly empty. With the ghost the committed glyphs are still painted
-#      in there, so B comes back at about A.
+#   B  the editor open over it with the text selected and deleted - the box has
+#      to be empty. With the ghost the committed glyphs are still painted in
+#      there, so B comes back at about A.
 #   C  after ESC, which cancels the edit - back to A. This is what separates a
 #      label excluded from the base for the duration of an edit from one that has
 #      simply been erased from it.
@@ -42,8 +42,13 @@ function Grab([string]$path) {
     $g.Dispose()
     return $bmp
 }
+# Absolute mouse_event rather than Cursor.Position: the latter stops moving
+# without error once Windows starts flagging the script's process "(未响应)", and
+# then every later click lands wherever the pointer happened to be.
 function MoveTo([int]$x, [int]$y) {
-    [System.Windows.Forms.Cursor]::Position = New-Object System.Drawing.Point($x, $y)
+    [void][TG]::mouse_event(0x8001, [uint32][int][Math]::Floor(65535 * $x / 3840),
+                            [uint32][int][Math]::Floor(65535 * $y / 2160), 0,
+                            [UIntPtr]::Zero)
     Start-Sleep -Milliseconds 90
 }
 function Down { [void][TG]::mouse_event($LEFTDOWN, 0, 0, 0, [UIntPtr]::Zero); Start-Sleep -Milliseconds 150 }
@@ -100,6 +105,15 @@ function Find-Kids([IntPtr]$parent, [string]$title) {
 function Rect-Of([IntPtr]$h) {
     $r = New-Object TG+RECT
     [void][TG]::GetWindowRect($h, [ref]$r)
+    return $r
+}
+# The editor window is the input surface, and it stops 4px short of the label's box
+# on every side so the eight square markers and the red frame stay outside it and
+# the overlay can paint them whole. The box the label draws is this rect inflated by
+# that inset, and every measurement here is about that box.
+function Edit-Box([IntPtr]$h) {
+    $r = Rect-Of $h
+    $r.left -= 4; $r.top -= 4; $r.right += 4; $r.bottom += 4
     return $r
 }
 function IsRed($c) { return ($c.R -gt 190 -and $c.G -lt 120 -and $c.B -lt 130) }
@@ -166,17 +180,21 @@ $ed = Editor
 if (-not $ed) { 'FAIL: clicking with the text tool opened no editor'; exit 1 }
 Keys ('GHOSTTEST ' * 4)
 Start-Sleep -Milliseconds 900
-$box0 = Rect-Of $ed
-Keys '{ENTER}'
+$box0 = Edit-Box $ed
+# Plain Enter belongs to the control and inserts a newline; Ctrl+Enter is the
+# commit.
+Keys '^({ENTER})'
 Start-Sleep -Milliseconds 700
 Click $p[0] $p[1]              # disarm, so a double click lands on the label
 
 # --- A: the label as committed ------------------------------------------------
-# The inset keeps the selection chrome out of the count: the guide line is on the
-# box and the markers straddle it.
+# The inset keeps the selection chrome out of the count: the frame is stroked 2px
+# outside the box and the markers straddle the edge, reaching about 2px inside it.
+# The ink itself starts 6px below the top edge, so an inset any wider than that
+# starts cutting the glyphs off and the count stops meaning anything.
 MoveTo 2300 1800; Start-Sleep -Milliseconds 400
 $gA = Grab 'D:\Project\winshot\obj\tg_committed.png'
-$il = $box0.left + 8; $it = $box0.top + 8; $ir = $box0.right - 9; $ib = $box0.bottom - 9
+$il = $box0.left + 4; $it = $box0.top + 4; $ir = $box0.right - 5; $ib = $box0.bottom - 5
 $inkA = Ink-Box $gA $il $it $ir $ib
 $gA.Dispose()
 if (-not $inkA) { 'FAIL: the committed label drew no ink in its own box'; exit 1 }
@@ -188,24 +206,24 @@ if ($nA -lt 300) { "FAIL: only $nA red px in the committed label, so the box pro
 DblClick ([int](($inkA.l + $inkA.r) / 2)) ([int](($inkA.t + $inkA.b) / 2))
 $ed2 = Editor
 if (-not $ed2) { 'FAIL: double-clicking the label did not re-open it'; exit 1 }
-$box = Rect-Of $ed2
+$box = Edit-Box $ed2
 "re-opened box: $($box.left),$($box.top) .. $($box.right),$($box.bottom)"
 if ([Math]::Abs($box.left - $box0.left) -gt 6 -or [Math]::Abs($box.top - $box0.top) -gt 6) {
     "FAIL: the re-opened editor is at a different place than the label, so it is not the same one"
     exit 1
 }
-# Backspace rather than Ctrl+A: the control is a plain EDIT and the count is
-# known, so deleting all but two characters is certain. Two rather than none
-# keeps the discard-an-empty-label path out of the measurement.
-MoveTo ([int](($box.left + $box.right) / 2)) ([int](($box.top + $box.bottom) / 2))
-Keys '{END}'
-for ($i = 0; $i -lt 38; $i++) { Keys '{BACKSPACE}' }
+# Ctrl+A is the control's own select-all and Delete then empties the selection in
+# one keystroke, so the result does not depend on 38 keys all arriving. Emptying
+# it is safe: the label is only discarded on commit, and this step ends with ESC.
+Keys '^a'
+Start-Sleep -Milliseconds 200
+Keys '{DEL}'
 Start-Sleep -Milliseconds 800
 MoveTo 2300 1800; Start-Sleep -Milliseconds 400
 $gB = Grab 'D:\Project\winshot\obj\tg_emptied.png'
 $nB = RedCount $gB $il $it $ir $ib
 $gB.Dispose()
-"editor open, 2 chars left: $nB red px in the same box (want well under $nA)"
+"editor open, text deleted: $nB red px in the same box (want well under $nA)"
 if ($nB -gt [int](0.3 * $nA)) {
     $fail += "with the text deleted the box still holds $nB red px where the label drew ${nA}: the committed glyphs are painted behind the editor"
 }

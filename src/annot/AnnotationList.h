@@ -38,7 +38,11 @@ Gdiplus::REAL HandleSize(const Annotation& a, Gdiplus::REAL base);
 
 // Selection chrome, per 矩形-点击已画矩形.png and
 // 椭圆-点击已画椭圆可调整大小位置.png: a thin red box where the shape does not
-// draw its own, and a white-cored red square on every handle.
-void DrawSelection(Gdiplus::Graphics& g, const Annotation& a, Gdiplus::REAL base);
+// draw its own, and a white-cored red square on every handle. `handles` off
+// leaves the markers out, which is how a text label reads when it is selected
+// but not being edited: the whole box is then a drag handle, and markers that
+// were not drawn must not be offered as grabs.
+void DrawSelection(Gdiplus::Graphics& g, const Annotation& a, Gdiplus::REAL base,
+                   bool handles = true);
 
 }  // namespace annot

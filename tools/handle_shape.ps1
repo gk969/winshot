@@ -59,12 +59,26 @@ function Grab([string]$path) {
     $g.Dispose()
     return $bmp
 }
+# Absolute mouse_event rather than Cursor.Position: the latter stops moving
+# without error once Windows starts flagging the script's process "(未响应)", and
+# then every later click lands wherever the pointer happened to be.
 function MoveTo([int]$x, [int]$y) {
-    [System.Windows.Forms.Cursor]::Position = New-Object System.Drawing.Point($x, $y)
+    [void][HS]::mouse_event(0x8001, [uint32][int][Math]::Floor(65535 * $x / 3840),
+                            [uint32][int][Math]::Floor(65535 * $y / 2160), 0,
+                            [UIntPtr]::Zero)
     Start-Sleep -Milliseconds 90
 }
 function Down { [void][HS]::mouse_event($LEFTDOWN, 0, 0, 0, [UIntPtr]::Zero); Start-Sleep -Milliseconds 150 }
 function Up { [void][HS]::mouse_event($LEFTUP, 0, 0, 0, [UIntPtr]::Zero); Start-Sleep -Milliseconds 350 }
+# Two presses inside the double-click time, which is what makes the shell pair
+# them into WM_LBUTTONDBLCLK rather than two single clicks.
+function DblClick([int]$x, [int]$y) {
+    MoveTo $x $y
+    [void][HS]::mouse_event($LEFTDOWN, 0, 0, 0, [UIntPtr]::Zero); Start-Sleep -Milliseconds 60
+    [void][HS]::mouse_event($LEFTUP, 0, 0, 0, [UIntPtr]::Zero); Start-Sleep -Milliseconds 60
+    [void][HS]::mouse_event($LEFTDOWN, 0, 0, 0, [UIntPtr]::Zero); Start-Sleep -Milliseconds 60
+    [void][HS]::mouse_event($LEFTUP, 0, 0, 0, [UIntPtr]::Zero); Start-Sleep -Milliseconds 450
+}
 function Walk([int]$x1, [int]$y1, [int]$x2, [int]$y2, [int]$steps) {
     for ($i = 1; $i -le $steps; $i++) {
         MoveTo ([int]($x1 + ($x2-$x1) * $i / $steps)) ([int]($y1 + ($y2-$y1) * $i / $steps))
@@ -106,6 +120,15 @@ function Rect-Of([IntPtr]$h) {
     [void][HS]::GetWindowRect($h, [ref]$r)
     return $r
 }
+# The editor window is the input surface, and it stops 4px short of the label's box
+# on every side so the eight square markers and the red frame stay outside it and
+# the overlay can paint them whole. The box the label draws is this rect inflated by
+# that inset, and every measurement here is about that box.
+function Edit-Box([IntPtr]$h) {
+    $r = Rect-Of $h
+    $r.left -= 4; $r.top -= 4; $r.right += 4; $r.bottom += 4
+    return $r
+}
 # annot::kSel is (250,55,58).
 function IsFull($c) { return ($c.R -gt 190 -and $c.G -lt 120 -and $c.B -lt 130) }
 function IsWhite($c) { return ($c.R -gt 200 -and $c.G -gt 200 -and $c.B -gt 200) }
@@ -142,8 +165,12 @@ function Marker($bmp, [int]$x, [int]$y, [string]$tag) {
 function Check-Half($m, [string]$what, $ref) {
     "$what marker radius $($m.up) against the rect's own default $($ref.up)"
     if (-not $m.white) { $script:fail += "the $what marker has no white core" }
-    if ($m.up -gt 3) {
-        $script:fail += "the $what marker reaches $($m.up) px out from the corner, want 3 or less (half the 5px it used to cover)"
+    # The half-side is 2.5 and the ring is stroked 1.5 wide on top of it, so the
+    # outer edge sits at 3.25 and anti-aliasing carries it to 4. What the request
+    # asks is half the 5px these used to cover, and the comparison against the
+    # rect's own marker below is what says that.
+    if ($m.up -gt 4) {
+        $script:fail += "the $what marker reaches $($m.up) px out from the corner, want 4 or less (half the 5px it used to cover)"
     }
     if ($m.up -ge $ref.up) {
         $script:fail += "the $what marker is $($m.up) px, no smaller than the rect's default $($ref.up): it did not shrink"
@@ -292,28 +319,44 @@ if ($mo.white) {
 }
 
 # A label: the editor's own box is the label's, so the corner to measure is known.
+# A label is the one kind whose markers come and go: a single click selects it and
+# draws only the red frame, because there is nothing to resize until the edit
+# opens, and the eight squares appear on that same box when a double click opens
+# it. Both states are measured, because "half size and square" only means
+# something once they exist.
 $p = Slot 5
 Click $p[0] $p[1]
 Click 1400 900
 $ed = @(Find-Kids $ov[0] 'WinShotTextEditor')
 if ($ed.Count -eq 0) { 'FAIL: clicking with the text tool opened no editor'; exit 1 }
-$eb = Rect-Of $ed[0]
+$eb = Edit-Box $ed[0]
 Keys 'HANDLESHAPE'
 Start-Sleep -Milliseconds 700
-Keys '{ENTER}'
+# Plain Enter belongs to the control and inserts a newline; Ctrl+Enter commits.
+Keys '^({ENTER})'
 Start-Sleep -Milliseconds 600
 Click $p[0] $p[1]              # disarm
 $g = Grab 'D:\Project\winshot\obj\hs_label_ink.png'
-# Inset past the box edge: the guide line sits on it and the markers straddle
-# it, so a shallow inset would report the selection chrome as ink and the click
-# below would land on a handle instead of on a glyph.
-$ink = Ink-Box $g ($eb.left + 8) ($eb.top + 8) ($eb.right - 9) ($eb.bottom - 9)
+# Inset past the box edge: the frame is stroked 2px outside it and the markers
+# straddle it, so a shallow inset would report the selection chrome as ink and
+# the click below would land on a handle instead of on a glyph. The ink itself
+# starts 6px below the top edge, so any deeper and the glyphs get clipped.
+$ink = Ink-Box $g ($eb.left + 4) ($eb.top + 4) ($eb.right - 5) ($eb.bottom - 5)
 $g.Dispose()
 if (-not $ink) { 'FAIL: the label drew no ink'; exit 1 }
 Click ($ink.l + 20) ($ink.t + 5)
 Start-Sleep -Milliseconds 400
+$g = Grab 'D:\Project\winshot\obj\hs_label_sel.png'
+$sel = Marker $g $eb.left $eb.top 'label selected'
+$g.Dispose()
+"selected label: radius=$($sel.up) coreWhite=$($sel.white) (the frame is the only chrome here)"
+if ($sel.white) {
+    $fail += 'a selected label that is not being edited shows a marker: it has no handles to mark until the edit opens'
+}
+DblClick ($ink.l + 20) ($ink.t + 5)
+Start-Sleep -Milliseconds 400
 $g = Grab 'D:\Project\winshot\obj\hs_label.png'
-$tx = Marker $g $eb.left $eb.top 'label'
+$tx = Marker $g $eb.left $eb.top 'label editing'
 $g.Dispose()
 Check-Half $tx 'label' $rx[1]
 

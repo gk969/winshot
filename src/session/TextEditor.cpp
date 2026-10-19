@@ -9,19 +9,40 @@ namespace {
 
 constexpr int kEditId = 1;
 
+// A multiline EDIT with ES_AUTOVSCROLL reserves a vertical scrollbar's width in
+// the width it breaks lines at, whether or not a scrollbar is showing: measured,
+// a 32px client put a 23px string on two lines. The label has no such reserve —
+// it draws at box.Width - 2*PadX — so the editor has to hand the same width back
+// when it decides where lines break, or the control wraps earlier than the box is
+// tall enough for and the caret's line falls outside it. Wrapping at the
+// narrower width is the safe direction: the box is then a line taller than the
+// control needs rather than a line short.
+int WrapSlack() {
+    static const int px = ::GetSystemMetrics(SM_CXVSCROLL);
+    return px;
+}
+
 }  // namespace
 
 BEGIN_MESSAGE_MAP(CTextEditBox, CEdit)
     ON_WM_CHAR()
+    ON_WM_LBUTTONUP()
 END_MESSAGE_MAP()
 
 void CTextEditBox::OnChar(UINT nChar, UINT nRepCnt, UINT nFlags) {
-    if (nChar == VK_RETURN) {
-        static_cast<CTextEditor*>(GetParent())->Finish(true);
+    CTextEditor* ed = static_cast<CTextEditor*>(GetParent());
+    if (nChar == VK_ESCAPE) {
+        ed->Finish(false);
         return;
     }
-    if (nChar == VK_ESCAPE) {
-        static_cast<CTextEditor*>(GetParent())->Finish(false);
+    // Enter belongs to the control: a multiline EDIT inserts a newline, which is
+    // what the 文字 box needs rather than what a dialog's default button wants.
+    // The control reports Ctrl+Enter as a line feed and plain Enter as a carriage
+    // return, so the commit is the line feed plus the carriage return with Ctrl
+    // held, which leaves plain Enter alone either way.
+    const bool ctrl = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
+    if (nChar == 10 || (nChar == VK_RETURN && ctrl)) {
+        ed->Finish(true);
         return;
     }
     // The common control has no Ctrl+A of its own; re-editing a label means
@@ -33,6 +54,15 @@ void CTextEditBox::OnChar(UINT nChar, UINT nRepCnt, UINT nFlags) {
     CEdit::OnChar(nChar, nRepCnt, nFlags);
 }
 
+void CTextEditBox::OnLButtonUp(UINT nFlags, CPoint pt) {
+    CEdit::OnLButtonUp(nFlags, pt);
+    if (!m_placeAtEnd) return;
+    m_placeAtEnd = false;
+    // SetSel(-1, -1) selects; the caret at the end of the text is (len, len).
+    const int len = GetWindowTextLength();
+    SetSel(len, len);
+}
+
 BEGIN_MESSAGE_MAP(CTextEditor, CWnd)
     ON_WM_CTLCOLOR()
     ON_WM_ERASEBKGND()
@@ -40,23 +70,30 @@ BEGIN_MESSAGE_MAP(CTextEditor, CWnd)
     ON_EN_CHANGE(kEditId, &CTextEditor::OnEnChange)
 END_MESSAGE_MAP()
 
-BOOL CTextEditor::Create(CWnd* parent, CaptureSession* session, CPoint at,
-                         const CString& text, int fontPx, Gdiplus::Color ink,
-                         COLORREF back, annot::ShapeText* target) {
+BOOL CTextEditor::Create(CWnd* parent, CaptureSession* session,
+                         annot::ShapeText* label, COLORREF back) {
     m_session = session;
-    m_at = at;
-    m_fontPx = fontPx;
-    m_ink = ink;
-    m_target = target;
+    m_label = label;
+    m_fontPx = (int)label->FontPx();
+    m_ink = label->Ink();
     m_backColor = back;
 
-    const HWND ph = parent->GetSafeHwnd();
-    const CRect box(at.x, at.y, at.x + Dpi::S(ph, annot::kTextMinW),
-                    at.y + fontPx + Dpi::S(ph, annot::kTextPadY));
+    const CString text = label->Text();
+    const Gdiplus::RectF box = label->Box();
+    // The window stops short of the box edge by the same padding the ink is inset
+    // by, because that is how far the eight square markers reach inward: a window
+    // that covered them would clip the overlay's paint there and each marker would
+    // read as an L instead of a square. The control inside is placed back out to
+    // the box's own top edge, so the ink still lands exactly where the committed
+    // label puts it.
+    const int padX = (int)label->PadX();
+    const CRect host((int)box.X + padX, (int)box.Y + padX,
+                     (int)(box.X + box.Width) - padX,
+                     (int)(box.Y + box.Height) - padX);
 
     LPCTSTR cls = AfxRegisterWndClass(0, ::LoadCursor(nullptr, IDC_IBEAM));
     if (!cls) return FALSE;
-    if (!CreateEx(0, cls, L"WinShotTextEditor", WS_CHILD | WS_VISIBLE, box, parent, 0))
+    if (!CreateEx(0, cls, L"WinShotTextEditor", WS_CHILD | WS_VISIBLE, host, parent, 0))
         return FALSE;
 
     m_back.CreateSolidBrush(m_backColor);
@@ -71,14 +108,28 @@ BOOL CTextEditor::Create(CWnd* parent, CaptureSession* session, CPoint at,
     // Multiline because the box stops at the 选区's right edge and the text has
     // to wrap into more lines rather than run past it. ES_AUTOHSCROLL is out for
     // the same reason: it would scroll the text sideways inside the box instead.
+    // ES_AUTOVSCROLL has to stay in: without it the control cannot bring the
+    // caret's line into view, and it answers a character that would land past the
+    // last visible line by refusing it outright — the box then never learns the
+    // text grew and stops following it. The scrollbar width it reserves in the
+    // control's wrap width is what WrapSlack() gives back.
+    // Screen-wise this is the same rectangle as before: the host moved in by padX
+    // on every side, so the control moves back out by padX at the top and spans
+    // the host's whole width. Its own height is the box's, which is what the
+    // control needs to lay out and scroll its lines by.
     if (!m_edit.CreateEx(0, L"EDIT", text,
                          WS_CHILD | WS_VISIBLE | ES_MULTILINE | ES_AUTOVSCROLL |
                              ES_WANTRETURN,
-                         CRect(0, 0, box.Width(), box.Height()), this, kEditId))
+                         CRect(0, -padX, std::max(host.Width(), 1),
+                               host.Height() + 2 * padX),
+                         this, kEditId))
         return FALSE;
 
     m_edit.SetFont(&m_font, TRUE);
-    m_edit.SetSel(-1, -1);
+    // Caret at the end, and armed again against the second press of the double
+    // click that opened this edit, which the control is about to answer.
+    m_edit.SetSel(text.GetLength(), text.GetLength());
+    m_edit.PlaceCaretAtEnd();
     m_edit.SetFocus();
     int s = 0, e = 0;
     m_edit.GetSel(s, e);
@@ -86,7 +137,6 @@ BOOL CTextEditor::Create(CWnd* parent, CaptureSession* session, CPoint at,
     m_lastSelStart = s;
     m_lastSelEnd = e;
 
-    FitToText();
     RebuildBackdrop();
     return TRUE;
 }
@@ -101,14 +151,6 @@ CString CTextEditor::Text() const {
     CString t;
     if (m_edit.GetSafeHwnd()) m_edit.GetWindowText(t);
     return t;
-}
-
-CRect CTextEditor::Frame() const {
-    CRect r;
-    if (!GetSafeHwnd()) return r;
-    GetWindowRect(&r);
-    if (CWnd* parent = GetParent()) parent->ScreenToClient(r);
-    return r;
 }
 
 void CTextEditor::Finish(bool commit) {
@@ -130,64 +172,96 @@ CRect CTextEditor::Limit() const {
     return sel.IsRectEmpty() ? pcl : sel;
 }
 
-CSize CTextEditor::BoxFor(const CString& text, int maxW) const {
-    const HWND hw = GetSafeHwnd();
-    const int pad = Dpi::S(hw, annot::kTextPadX);
-    const int minW = Dpi::S(hw, annot::kTextMinW);
-    const Gdiplus::REAL fontPx = (Gdiplus::REAL)m_fontPx;
+Gdiplus::REAL CTextEditor::NeededHeight(const CString& text,
+                                        Gdiplus::REAL width) const {
+    const int lines =
+        (int)annot::WrapLines(text, m_label->FontPx(),
+                              std::max(width - 2.0f * m_label->PadX() -
+                                             (Gdiplus::REAL)WrapSlack(),
+                                         1.0f))
+            .size();
+    return m_label->FontPx() + m_label->PadY() +
+           (lines - 1) * m_label->LineHeight();
+}
 
-    // One line if the frame is wide enough for it, otherwise as many as the
-    // frame's width forces — with the same wrap the committed label will use, so
-    // the text does not move when the edit closes.
-    const int oneLine =
-        (int)std::ceil(annot::MeasureTextWidth(text, fontPx)) + 2 * pad;
-    const int w = std::max(minW, std::min(maxW, oneLine));
-    const int lines = (int)annot::WrapLines(text, fontPx,
-                                            (Gdiplus::REAL)std::max(w - 2 * pad, 1))
-                          .size();
-    const int lineH = (int)std::ceil(annot::MeasureTextLineHeight(fontPx));
-    return CSize(w, m_fontPx + Dpi::S(hw, annot::kTextPadY) +
-                       (lines - 1) * lineH);
+Gdiplus::RectF CTextEditor::BoxFor(const CString& text) const {
+    const Gdiplus::RectF now = m_label->Box();
+    const CRect lim = Limit();
+
+    Gdiplus::RectF want = now;
+    // The width grows only while the text has no width of its own. A label whose
+    // handle has been dragged carries the width the user gave it, and re-opening
+    // it must re-wrap at that width rather than stretch back to one line.
+    if (!m_label->UserSized()) {
+        // Wide enough that the control keeps the whole line on one line, which
+        // means room for the scrollbar width it reserves on top of the ink and
+        // the padding. NeededHeight subtracts the same amount, so the two agree.
+        const Gdiplus::REAL oneLine =
+            annot::MeasureTextWidth(text, m_label->FontPx()) +
+            2.0f * m_label->PadX() + (Gdiplus::REAL)WrapSlack();
+        want.Width = std::max(want.Width,
+                              std::min(oneLine, (Gdiplus::REAL)lim.right - now.X));
+    }
+    want.Height = std::max(want.Height, NeededHeight(text, want.Width));
+    want.Height = std::min(want.Height, (Gdiplus::REAL)lim.bottom - now.Y);
+    return want;
 }
 
 bool CTextEditor::FitsText(const CString& text) const {
-    const CRect here = Frame();
-    const CRect lim = Limit();
-    return here.top + BoxFor(text, (int)(lim.right - here.left)).cy <= lim.bottom;
+    // BoxFor caps the height at the 选区's bottom edge, so the question is whether
+    // the text needed more than that: the box cannot scroll, so a change that
+    // needs another line the frame has no room for is refused outright.
+    const Gdiplus::RectF box = BoxFor(text);
+    return box.Y + NeededHeight(text, box.Width) <= (Gdiplus::REAL)Limit().bottom;
 }
 
-void CTextEditor::FitToText() {
-    const CRect here = Frame();
-    CRect cl;
-    GetClientRect(&cl);
+void CTextEditor::SyncToBox() {
+    if (!GetSafeHwnd() || !m_label) return;
 
-    const CSize want = BoxFor(Text(), (int)(Limit().right - here.left));
-    if (want.cx == cl.Width() && want.cy == cl.Height()) return;
+    const int padX = (int)m_label->PadX();
+    const Gdiplus::RectF box = m_label->Box();
+    CRect now((int)box.X + padX, (int)box.Y + padX,
+              (int)(box.X + box.Width) - padX, (int)(box.Y + box.Height) - padX);
 
-    // The overlay strokes the red frame 2px outside us, so it has to repaint
-    // both the band we leave and the band we take.
-    CRect was = here;
-    was.InflateRect(3, 3);
-    CRect now(here.left - 3, here.top - 3, here.left + want.cx + 3,
-              here.top + want.cy + 3);
-    now.UnionRect(now, was);
+    CRect was;
+    GetWindowRect(&was);
+    if (CWnd* parent = GetParent()) parent->ScreenToClient(was);
 
-    // Frame() is already in the parent's client space, which is what a child
-    // MoveWindow wants; the inner edit keeps (0,0) because its parent is us.
-    MoveWindow(here.left, here.top, want.cx, want.cy);
-    m_edit.MoveWindow(0, 0, want.cx, want.cy);
-    RebuildBackdrop();
-    GetParent()->InvalidateRect(&now, FALSE);
+    if (now != was) {
+        MoveWindow(now);
+        // The control keeps the screen rectangle it had when this window was the
+        // box itself: back out to the box's top edge and across its whole width,
+        // so the caret starts where the committed label puts its ink and the text
+        // wraps at the width it wraps at, and so the lines the control lays out
+        // are the lines the label will draw.
+        m_edit.MoveWindow(0, -padX, std::max(now.Width(), 1),
+                          now.Height() + 2 * padX);
+        RebuildBackdrop();
+    }
+
+    // The overlay strokes the red frame 2px outside the box and draws the markers
+    // straddling its edge, so it has to repaint the band we leave and the band we
+    // take — measured from the box, which is padX further out on every side.
+    CRect dirty = now;
+    dirty.InflateRect(padX + 3, padX + 3);
+    CRect gone = was;
+    gone.InflateRect(padX + 3, padX + 3);
+    dirty.UnionRect(dirty, gone);
+    if (CWnd* parent = GetParent()) parent->InvalidateRect(&dirty, FALSE);
 }
 
 void CTextEditor::RebuildBackdrop() {
+    // Sampled over the control's own rectangle, not this window's: the tile is
+    // applied with its origin at the control's client (0,0), so sampling it
+    // anywhere else leaves the frozen screen under the caret offset by the gap.
     CRect cl;
-    GetClientRect(&cl);
+    if (!m_edit.GetSafeHwnd()) return;
+    m_edit.GetClientRect(&cl);
     if (cl.IsRectEmpty() || !m_session || !m_session->Overlay().GetSafeHwnd())
         return;
 
     CPoint src = cl.TopLeft();
-    ::ClientToScreen(GetSafeHwnd(), &src);
+    ::ClientToScreen(m_edit.GetSafeHwnd(), &src);
     if (CWnd* parent = GetParent()) parent->ScreenToClient(&src);
     const CRect srcRect(src, src + cl.Size());
 
@@ -275,8 +349,11 @@ void CTextEditor::OnEnChange() {
         m_edit.GetSel(s, e);
         m_lastSelStart = s;
         m_lastSelEnd = e;
+        // The label carries the box the edit is typing into, so the frame the
+        // overlay strokes and the box the label commits are one rect.
+        m_label->AdoptBox(BoxFor(Text()));
     }
-    FitToText();
+    SyncToBox();
 }
 
 void CTextEditor::OnEnKillFocus() {

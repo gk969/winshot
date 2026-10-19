@@ -152,6 +152,13 @@ private:
     // Row of the open 字号 list under `pt`, or -1.
     int HitFontRow(CPoint pt) const;
     annot::ShapeText* TextAt(CPoint pt) const;
+    // The text label the red frame belongs to: the selected one, when the
+    // selection is a label. An edit always selects its label, so this is the
+    // label in both the editing and the merely selected state.
+    annot::ShapeText* FrameText() const;
+    // False for a text label that is not being edited: it draws no square
+    // markers, so none may be grabbed either, and the whole box is a move handle.
+    bool HasMarkers(const annot::Annotation& a) const;
     bool ResolvePopup(CPoint pt);
     // A press here is outside a region the user already picked, away from its
     // grips: nothing on the canvas answers to it.

@@ -29,6 +29,10 @@ inline constexpr int kPropHeight = 37;
 inline constexpr int kPropPad = 13;      // bar edge -> first dot centre
 inline constexpr int kDotPitch = 25;
 inline constexpr int kDotSizes[3] = { 2, 4, 8 };
+// The dots are drawn half again as large as the stroke they stand for: a 2px dot
+// in a 37px bar reads as a speck. kDotSizes stays the pen width every tool draws
+// with, so a dot still changes the stroke by exactly what it always did.
+inline constexpr int kDotDraw[3] = { 3, 6, 12 };
 inline constexpr int kDotBox = 24;       // frame around the selected dot
 inline constexpr int kSwatch = 13;
 inline constexpr int kSwatchPitch = 15;

@@ -1,4 +1,4 @@
-# The text editor is a real EDIT child, and it used to paint its background with
+﻿# The text editor is a real EDIT child, and it used to paint its background with
 # the average colour sampled from behind it: an opaque block while you typed,
 # turning transparent only once the edit closed. It also grew sideways to the
 # screen's right edge rather than the region's, and never wrapped.
@@ -7,9 +7,9 @@
 # editor is opened across its top stroke, so a transparent backdrop has to show
 # that stroke and an opaque one cannot. The wrap: a long string pushes the box's
 # right edge onto the region's and grows it downwards. The stop: past the region's
-# bottom the control takes no more characters. The committed label: dragging its
-# right grip narrower re-wraps it, and the rows that no longer fit are not drawn
-# below the box.
+# bottom the control takes no more characters. The committed label: double-clicking
+# it brings its box back with the width it was left at, dragging the right marker
+# of that box re-wraps it, and the rows that no longer fit are not drawn below it.
 Add-Type -AssemblyName System.Drawing, System.Windows.Forms
 Add-Type @"
 using System;
@@ -54,6 +54,17 @@ function Drag([int]$x1, [int]$y1, [int]$x2, [int]$y2) {
     MoveTo $x1 $y1; Down; Walk $x1 $y1 $x2 $y2 20; Up
 }
 function Click([int]$x, [int]$y) { MoveTo $x $y; Down; Up }
+function DblClick([int]$x, [int]$y) {
+    MoveTo $x $y
+    [void][TW]::mouse_event($LEFTDOWN, 0, 0, 0, [UIntPtr]::Zero)
+    Start-Sleep -Milliseconds 60
+    [void][TW]::mouse_event($LEFTUP, 0, 0, 0, [UIntPtr]::Zero)
+    Start-Sleep -Milliseconds 60
+    [void][TW]::mouse_event($LEFTDOWN, 0, 0, 0, [UIntPtr]::Zero)
+    Start-Sleep -Milliseconds 60
+    [void][TW]::mouse_event($LEFTUP, 0, 0, 0, [UIntPtr]::Zero)
+    Start-Sleep -Milliseconds 450
+}
 # Not `Type`: that is the built-in alias for Get-Content, and an alias beats a
 # function, so a function of that name is never called.
 function Keys([string]$s) { [void][System.Windows.Forms.SendKeys]::SendWait($s) }
@@ -84,6 +95,15 @@ function Find-Kids([IntPtr]$parent, [string]$title) {
 function Rect-Of([IntPtr]$h) {
     $r = New-Object TW+RECT
     [void][TW]::GetWindowRect($h, [ref]$r)
+    return $r
+}
+# The editor window is the input surface, and it stops 4px short of the label's box
+# on every side so the eight square markers and the red frame stay outside it and
+# the overlay can paint them whole. The box the label draws is this rect inflated by
+# that inset, and every measurement here is about that box.
+function Edit-Box([IntPtr]$h) {
+    $r = Rect-Of $h
+    $r.left -= 4; $r.top -= 4; $r.right += 4; $r.bottom += 4
     return $r
 }
 function IsRed($c) { return ($c.R -gt 190 -and $c.G -lt 120 -and $c.B -lt 130) }
@@ -143,6 +163,13 @@ $ov = @(Find-Wins 'WinShotOverlay')
 if ($ov.Count -eq 0) { 'FAIL: no overlay window'; exit 1 }
 
 Drag $sel[0] $sel[1] $sel[2] $sel[3]
+# The still under the frame is the desktop as it was, and the desktop has its own
+# red in it -- a ClearType glyph here once read as 42px of undo residue. What an
+# undo has to answer for is the difference from this, never an absolute zero.
+Start-Sleep -Milliseconds 300
+$b0 = Grab ''
+$baseRed = RedCount $b0 890 690 1510 1010
+$b0.Dispose()
 $p = Slot 0
 if (-not $p) { 'FAIL: no toolbar'; exit 1 }
 Click $p[0] $p[1]              # the rectangle tool
@@ -161,7 +188,8 @@ if (-not $ed) { 'FAIL: clicking with the text tool opened no editor'; exit 1 }
 Keys 'abc'
 Start-Sleep -Milliseconds 600
 MoveTo 2300 1800; Start-Sleep -Milliseconds 400
-$er = Rect-Of $ed
+$er = Edit-Box $ed
+
 $a = Grab 'D:\Project\winshot\obj\tw_backdrop.png'
 $in = RedCount $a ($er.left + 3) 698 ($er.right - 3) 702
 $out = RedCount $a 905 698 945 702
@@ -181,18 +209,22 @@ Start-Sleep -Milliseconds 500
 $c = Grab 'D:\Project\winshot\obj\tw_cleared.png'
 $rest = RedCount $c 890 690 1510 1010
 $c.Dispose()
-"ink left after undo: $rest red px (want 0)"
-if ($rest -gt 0) { $fail += "undo left $rest red px behind, so the label measurements are contaminated" }
+"ink left after undo: $rest red px, against $baseRed in the still itself"
+if ($rest -gt $baseRed) {
+    $fail += "undo left $($rest - $baseRed) red px over the $baseRed the still already had, so the label measurements are contaminated"
+}
 
 # --- a long string wraps into the region instead of past its right edge --------
 Click 950 690
 $ed = Editor
 if (-not $ed) { 'FAIL: no editor for the long string'; exit 1 }
-$r0 = Rect-Of $ed
+$r0 = Edit-Box $ed
+
 $h0 = $r0.bottom - $r0.top
 Keys ('abcdefghij ' * 13)
 Start-Sleep -Milliseconds 900
-$r1 = Rect-Of $ed
+$r1 = Edit-Box $ed
+
 "after 143 chars: box $($r1.left),$($r1.top) .. $($r1.right),$($r1.bottom), height $h0 -> $($r1.bottom - $r1.top)"
 if ($r1.right -gt 1602) { $fail += "the box ran past the region's right edge: right=$($r1.right), limit 1600" }
 if ($r1.right -lt 1580) { $fail += "the box stopped at $($r1.right) instead of using the region's width" }
@@ -204,14 +236,15 @@ if ($h1 - $h0 -lt 2 * ($h0 - 20)) {
     $fail += "the box did not grow down: height $h0 -> $h1, want at least two more lines"
 }
 
-# --- commit, then narrow the label from its right grip ----------------------
+# --- commit, then narrow the label from its right marker ---------------------
 # More text first: the narrowing test wants enough of it that rows genuinely stop
-# fitting. The box the editor ends on is the label's box, so its grips are known
-# exactly, and the inset keeps the measurement clear of the selection chrome --
-# the guide line is 1px on the box and the rings reach 5px past it.
+# fitting. The box the editor ends on is the label's box, so its markers are known
+# exactly, and the inset keeps the measurement clear of the frame -- the line is
+# 2px outside the box and the markers reach 5px past it.
 Keys ('abcdefghij ' * 10)
 Start-Sleep -Milliseconds 900
-$box = Rect-Of $ed
+$box = Edit-Box $ed
+
 $il = $box.left + 8; $it = $box.top + 8; $ir = $box.right - 9; $ib = $box.bottom - 9
 MoveTo 2300 1800; Start-Sleep -Milliseconds 300
 $g0 = Grab 'D:\Project\winshot\obj\tw_before_narrow.png'
@@ -221,7 +254,9 @@ $g0.Dispose()
 if (-not $ink0) { 'FAIL: no text ink to narrow'; exit 1 }
 "label before commit: box $($box.left),$($box.top) .. $($box.right),$($box.bottom), $($ink0.n) red px in the inset, ink right edge at $($ink0.r)"
 
-Keys '{ENTER}'
+# Enter belongs to the control now -- it inserts a line break. Ctrl+Enter is what
+# closes the edit.
+Keys '^({ENTER})'
 Start-Sleep -Milliseconds 700
 Click $p[0] $p[1]              # disarm, so a press on the label selects it
 # The band just below the box. The selection rings sit on the box's corners and
@@ -235,23 +270,41 @@ $below0 = RedCount $g1 $bl0 ($box.bottom + 2) $bl1 ($box.bottom + 6)
 $g1.Dispose()
 "committed label: $below0 red px in the band below the box"
 
-Click ($ink0.l + 20) ($ink0.t + 5)     # select the label
+# A label that is only selected wears no markers -- the whole box is one move
+# handle then. The eight squares appear on the box when it is being edited, and
+# that is the state its width is changed from.
+DblClick ($ink0.l + 20) ($ink0.t + 5)
 $midY = [int](($box.top + $box.bottom) / 2)
 Drag $box.right $midY ($box.right - 250) $midY
-Start-Sleep -Milliseconds 500
+# Narrowing re-wraps the text into more lines, and the box grows taller to keep
+# them: one left at its old height would drop the new last line off the bottom, so
+# a gesture meant only to re-wrap would delete the end of the text. The band that
+# has to stay clean is therefore the one below where the box ends now, and the
+# editor is still open to read that from.
+$edN = Editor
+if (-not $edN) { 'FAIL: the double click did not re-open the editor to narrow' ; exit 1 }
+$boxN = Edit-Box $edN
+Keys '^({ENTER})'                      # commit the narrowed label
+Start-Sleep -Milliseconds 700
 MoveTo 2300 1800; Start-Sleep -Milliseconds 300
 $g2 = Grab 'D:\Project\winshot\obj\tw_narrowed.png'
 $n1 = RedCount $g2 $il $it $ir $ib
 $ink1 = Ink-Box $g2 $il $it $ir $ib
-$below1 = RedCount $g2 $bl0 ($box.bottom + 2) $bl1 ($box.bottom + 6)
+$below1 = RedCount $g2 $bl0 ($boxN.bottom + 2) $bl1 ($boxN.bottom + 6)
 $g2.Dispose()
-"after narrowing 250px: $($ink1.n) red px in the inset, ink right edge at $($ink1.r), $below1 px below the box"
+"after narrowing 250px: box now $($boxN.left),$($boxN.top) .. $($boxN.right),$($boxN.bottom), height $($box.bottom - $box.top) -> $($boxN.bottom - $boxN.top), $($ink1.n) red px in the inset, ink right edge at $($ink1.r), $below1 px below the new box"
 if ($ink1.r -gt $ink0.r - 100) {
     $fail += "narrowing the box moved the text only from $($ink0.r) to $($ink1.r): it did not re-wrap"
 }
 if ($n1 -gt ($n0 - 300)) { $fail += "narrowing the box removed only $($n0 - $n1) red px of $n0" }
+if ($boxN.bottom -le $box.bottom) {
+    $fail += "narrowing the box left its bottom at $($boxN.bottom): the lines the narrower width asked for have nowhere to be drawn"
+}
+if ($ink1.r -gt $boxN.right - 4) {
+    $fail += "the narrowed label drew ink out to $($ink1.r), past its own right edge at $($boxN.right)"
+}
 if ($below1 -gt $below0 + 20) {
-    $fail += "the narrowed label drew $below1 px below its box where it drew $below0 before: rows that stopped fitting are still painted"
+    $fail += "the narrowed label drew $below1 px below its box at $($boxN.bottom) where the same band had ${below0}: rows that stopped fitting are still painted"
 }
 
 # --- and past the region's bottom it stops taking characters ------------------
@@ -266,19 +319,29 @@ $prevBottom = 0
 for ($round = 0; $round -lt 12; $round++) {
     Keys ('klmnopqrst ' * 40)
     Start-Sleep -Milliseconds 500
-    $rb = Rect-Of $ed2
+    $rb = Edit-Box $ed2
     if ($rb.bottom -le $prevBottom) { break }
     $prevBottom = $rb.bottom
 }
-$r3 = Rect-Of $ed2
-# The control has to refuse what no longer fits. The box and the ink it draws are
-# the witness; the caret blinks, so the ink count gets a tolerance.
-$gA = Grab 'D:\Project\winshot\obj\tw_at_bottom.png'
-$inkA = RedCount $gA ($r3.left + 8) ($r3.top + 8) ($r3.right - 9) ($r3.bottom - 9)
-$gA.Dispose()
+# The box stops growing at the region's bottom, but the last round of 400 usually
+# leaves a line or two of the box empty, because the box keeps the tallest it ever
+# reached while a batch that did not fit is rolled back. So the next batch is not
+# automatically the refused one: fill until the ink stops moving and only then ask
+# whether more text is refused. The caret blinks, so the count gets a tolerance.
+$inkA = 0; $inkPrev = -1; $r3 = $null; $stable = $false
+for ($round = 0; $round -lt 6; $round++) {
+    Keys ('uvwxyz ' * 40)
+    Start-Sleep -Milliseconds 900
+    $r3 = Edit-Box $ed2
+    $gA = Grab ('D:\Project\winshot\obj\tw_at_bottom' + $round + '.png')
+    $inkA = RedCount $gA ($r3.left + 8) ($r3.top + 8) ($r3.right - 9) ($r3.bottom - 9)
+    $gA.Dispose()
+    if ([Math]::Abs($inkA - $inkPrev) -le 60) { $stable = $true; break }
+    $inkPrev = $inkA
+}
 Keys ('uvwxyz ' * 40)
 Start-Sleep -Milliseconds 900
-$r4 = Rect-Of $ed2
+$r4 = Edit-Box $ed2
 $gB = Grab 'D:\Project\winshot\obj\tw_past_bottom.png'
 $inkB = RedCount $gB ($r4.left + 8) ($r4.top + 8) ($r4.right - 9) ($r4.bottom - 9)
 $gB.Dispose()
@@ -287,8 +350,11 @@ if ($r3.bottom -lt 1390) {
     $fail += "the box stopped growing at bottom $($r3.bottom) instead of reaching the region's bottom at 1400"
 }
 if ($r4.bottom -gt 1402) { $fail += "the box ran past the region's bottom: bottom=$($r4.bottom), limit 1400" }
-if ([Math]::Abs($inkB - $inkA) -gt 60) {
-    $fail += "at the region's bottom the box drew $inkB red px where it had drawn ${inkA}: it took text that no longer fits"
+if (-not $stable) {
+    $fail += "after 2400 more characters the box was still taking text at the region's bottom, so nothing refuses what no longer fits"
+}
+elseif ([Math]::Abs($inkB - $inkA) -gt 60) {
+    $fail += "the box had stopped taking text at bottom $($r3.bottom) and $inkA red px, and 280 more characters still drew $inkB"
 }
 
 [void][System.Windows.Forms.SendKeys]::SendWait('{ESC}')

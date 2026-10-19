@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <map>
 
 namespace annot {
 namespace {
@@ -69,29 +70,85 @@ namespace {
 
 // Wrapping measures a string per character, and building the face each time is
 // what would put that cost in every keystroke.
+//
+// The measurement is GDI's rather than GDI+'s. MeasureString returns the ink box
+// of the whole string, which for this face carries about 0.4em of cell padding
+// however long the string is — a single character and a whole paragraph are both
+// over-measured by the same amount — so a line reads as needing half a character
+// more room than it takes and the wrap lands early. GetTextExtentPoint32W
+// returns the advance width, which is what the drawn glyphs occupy (measured
+// against the ink: equal for CJK, within 2px for Latin), and it is the same
+// measurement the EDIT control wraps on, so the inline editor and the committed
+// label break in the same place.
 class TextMeasurer {
 public:
-    explicit TextMeasurer(Gdiplus::REAL fontPx)
-        : m_tmp(1, 1, PixelFormat32bppARGB), m_g(&m_tmp), m_family(kTextFace),
-          m_font(&m_family, fontPx, Gdiplus::FontStyleRegular,
-                 Gdiplus::UnitPixel) {
-        NoWrap(m_fmt);
-    }
+    explicit TextMeasurer(Gdiplus::REAL fontPx) : m_font(FontFor(fontPx)) {}
 
     Gdiplus::REAL Width(const CString& s) const {
         if (s.IsEmpty()) return 0.0f;
-        Gdiplus::RectF box(0.0f, 0.0f, 100000.0f, 100000.0f), out{};
-        m_g.MeasureString(s, s.GetLength(), &m_font, box, &m_fmt, &out);
-        return out.Width;
+        HDC dc = MemDc();
+        HGDIOBJ prev = SelectObject(dc, m_font);
+        SIZE sz{};
+        GetTextExtentPoint32W(dc, s, s.GetLength(), &sz);
+        SelectObject(dc, prev);
+        return (Gdiplus::REAL)sz.cx;
     }
 
 private:
-    Gdiplus::Bitmap m_tmp;
-    Gdiplus::Graphics m_g;
-    Gdiplus::FontFamily m_family;
-    Gdiplus::Font m_font;
-    Gdiplus::StringFormat m_fmt;
+    static HDC MemDc() {
+        // One DC for the process: it is only ever a carrier for the font, and the
+        // UI thread is the only caller.
+        static HDC dc = CreateCompatibleDC(nullptr);
+        return dc;
+    }
+
+    static HFONT FontFor(Gdiplus::REAL fontPx) {
+        static std::map<int, HFONT> fonts;
+        // -fontPx is the em height, which is what GDI+'s UnitPixel size means, so
+        // the two engines render the same glyphs at the same size.
+        const int px = std::max(1, (int)std::lround((double)fontPx));
+        const auto it = fonts.find(px);
+        if (it != fonts.end()) return it->second;
+        LOGFONTW lf{};
+        lf.lfHeight = -px;
+        lf.lfCharSet = DEFAULT_CHARSET;
+        wcscpy_s(lf.lfFaceName, kTextFace);
+        HFONT font = CreateFontIndirectW(&lf);
+        fonts.emplace(px, font);
+        return font;
+    }
+
+    HFONT m_font;
 };
+
+// GDI+ lays a string out inside the rect it is handed with about a fifth of an
+// em of cell padding on each side, and the ink starts there rather than at the
+// rect edge; GDI's advance width counts neither. Measuring one reference string
+// both ways gives the difference, so the label can put its ink a known distance
+// inside the box and hold the same distance open on the right — which is what
+// decides when a line wraps. A full-width CJK glyph is the cleanest probe: its
+// advance and its ink are the same width.
+Gdiplus::REAL CellPadding(Gdiplus::REAL fontPx) {
+    static std::map<int, Gdiplus::REAL> pads;
+    const int px = std::max(1, (int)std::lround((double)fontPx));
+    const auto it = pads.find(px);
+    if (it != pads.end()) return it->second;
+
+    const wchar_t probe[] = L"\x6587";  // 文
+    Gdiplus::Bitmap tmp(1, 1, PixelFormat32bppARGB);
+    Gdiplus::Graphics g(&tmp);
+    Gdiplus::FontFamily family(kTextFace);
+    Gdiplus::Font font(&family, fontPx, Gdiplus::FontStyleRegular,
+                       Gdiplus::UnitPixel);
+    Gdiplus::StringFormat fmt;
+    NoWrap(fmt);
+    Gdiplus::RectF box(0.0f, 0.0f, 100000.0f, 100000.0f), out{};
+    g.MeasureString(probe, 1, &font, box, &fmt, &out);
+    const Gdiplus::REAL pad =
+        std::max((out.Width - TextMeasurer(fontPx).Width(probe)) / 2.0f, 0.0f);
+    pads.emplace(px, pad);
+    return pad;
+}
 
 }  // namespace
 
@@ -421,11 +478,11 @@ void ShapeArrow::Draw(Gdiplus::Graphics& g) const {
     Gdiplus::PointF head[3], neck;
     HeadTriangle(m_p0, m_p1, m_pen, neck, head);
 
-    // The shaft is a quad that starts 2px wide and opens to the full width at
+    // The shaft is a quad that starts 1px wide and opens to the full width at
     // the head: drawn at a constant width the arrow reads as a line with a
     // triangle on the end, and the taper is what makes it point.
     const Gdiplus::REAL ux = dx / len, uy = dy / len;
-    const Gdiplus::REAL tailHw = std::min(m_pen / 2.0f, 1.0f);
+    const Gdiplus::REAL tailHw = std::min(m_pen / 2.0f, 0.5f);
     const Gdiplus::REAL headHw = m_pen / 2.0f;
     const Gdiplus::PointF shaft[4] = {
         Gdiplus::PointF(m_p0.X - uy * tailHw, m_p0.Y + ux * tailHw),
@@ -465,6 +522,19 @@ std::unique_ptr<Annotation> ShapeArrow::Clone() const {
 
 // ------------------------------------------------------------------- badges
 
+Gdiplus::REAL BadgeRadiusForPen(Gdiplus::REAL pen) {
+    // The three dots are 2, 4 and 8 px, a 4x span that would be absurd for a
+    // disc, so the sizes step by about 1.3x instead and the middle one stays
+    // where the tool always was.
+    if (pen <= 3.0f) return 10.0f;
+    if (pen <= 6.0f) return 13.0f;
+    return 17.0f;
+}
+
+Gdiplus::REAL MosaicBandForPen(Gdiplus::REAL pen) {
+    return 4.0f * pen;
+}
+
 Gdiplus::RectF ShapeBadge::BBox() const {
     return Gdiplus::RectF(m_center.X - m_r, m_center.Y - m_r, m_r * 2.0f,
                           m_r * 2.0f);
@@ -477,6 +547,7 @@ bool ShapeBadge::HitTest(Gdiplus::PointF pt) const {
 void ShapeBadge::Draw(Gdiplus::Graphics& g) const {
     const Gdiplus::RectF disc(m_center.X - m_r, m_center.Y - m_r, m_r * 2.0f,
                               m_r * 2.0f);
+    const Smooth smooth(g);
     Gdiplus::SolidBrush ink(m_ink);
     g.FillEllipse(&ink, disc);
 
@@ -514,7 +585,10 @@ Gdiplus::REAL ShapeText::LineHeight() const {
 
 Gdiplus::REAL ShapeText::TextWidth() const {
     // The padding is the editor's, so the label wraps at the width the editor
-    // wrapped at rather than at the width of its own frame.
+    // wrapped at rather than at the width of its own frame. It is also the ink's
+    // inset on both sides — Draw() lands the ink PadX inside the left edge, and
+    // wrapping on the advance width at this limit holds the same PadX open on the
+    // right, so a line only breaks when the right gap falls below the left one.
     return std::max(m_box.Width - 2.0f * PadX(), 1.0f);
 }
 
@@ -534,12 +608,22 @@ void ShapeText::AdoptBox(const Gdiplus::RectF& box) {
 
 void ShapeText::MoveHandle(int i, Gdiplus::PointF pt) {
     BoxResize(m_box, i, pt);
-    // The box is the user's from here on: it never grows to fit the text, so a
-    // narrower box re-wraps into more lines and a shorter one hides the ones that
-    // no longer fit. The floors keep at least one line visible.
+    // The box is the user's from here on: it never grows wider to fit the text, so
+    // a narrower box re-wraps into more lines. The floors keep one line visible.
     m_box.Width = std::max(m_box.Width, (Gdiplus::REAL)kTextMinW);
     m_box.Height = std::max(m_box.Height, m_fontPx + PadY());
+    m_userSized = true;
     InvalidateLayout();
+
+    // But it does grow taller, because the lines the new width asked for are not
+    // optional: Draw() stops at the box's bottom edge, so a box left at its old
+    // height would drop the new lines off the bottom and the gesture that was only
+    // meant to re-wrap the text would silently delete the end of it. Growing only,
+    // never shrinking, so dragging the bottom edge up still trims.
+    const Gdiplus::REAL need =
+        m_fontPx + PadY() +
+        (Gdiplus::REAL)((int)Lines().size() - 1) * LineHeight();
+    m_box.Height = std::max(m_box.Height, need);
 }
 
 const std::vector<CString>& ShapeText::Lines() const {
@@ -566,21 +650,29 @@ void ShapeText::Draw(Gdiplus::Graphics& g) const {
     g.SetClip(m_box, Gdiplus::CombineModeIntersect);
 
     // One DrawString per wrapped line, at the same pitch the editor used to grow
-    // its box, so committing does not move the text.
+    // its box, so committing does not move the text. The layout rect starts a
+    // cell padding left of where the ink should land, because that is where GDI+
+    // puts the ink inside the rect it is given.
     const Gdiplus::REAL lh = LineHeight();
+    const Gdiplus::REAL x = m_box.X + PadX() - CellPadding(m_fontPx);
     Gdiplus::REAL y = m_box.Y;
     for (const CString& line : Lines()) {
         if (y + lh > m_box.Y + m_box.Height) break;
         g.DrawString(line, line.GetLength(), &font,
-                     Gdiplus::RectF(m_box.X, y, 100000.0f, 100000.0f), &fmt, &ink);
+                     Gdiplus::RectF(x, y, 100000.0f, 100000.0f), &fmt, &ink);
         y += lh;
     }
     g.Restore(state);
 }
 
 bool ShapeText::HitTest(Gdiplus::PointF pt) const {
-    return pt.X >= m_box.X && pt.X <= m_box.X + m_box.Width &&
-           pt.Y >= m_box.Y && pt.Y <= m_box.Y + m_box.Height;
+    // Out to the frame line, which is the box's edge as far as the pointer is
+    // concerned: while the edit is open the input control covers everything
+    // inside, and 文本框双击编辑 asks for that line to move the box.
+    const Gdiplus::REAL pad =
+        (Gdiplus::REAL)std::lround((double)kTextFramePad * m_dpiScale);
+    return pt.X >= m_box.X - pad && pt.X <= m_box.X + m_box.Width + pad &&
+           pt.Y >= m_box.Y - pad && pt.Y <= m_box.Y + m_box.Height + pad;
 }
 
 std::unique_ptr<Annotation> ShapeText::Clone() const {
@@ -605,13 +697,12 @@ std::unique_ptr<Annotation> MakeShape(tb::Id tool, Gdiplus::PointF from,
     case tb::Id::Pen:
         return std::make_unique<ShapePen>(from, ink, pen);
     case tb::Id::Mosaic:
-        // The band is twice the dot the width picker shows: the reference's
-        // widest dot gives a 16px band, and the dots are 2/4/8.
-        return std::make_unique<ShapeMosaic>(from, mosaic, 2.0f * pen,
+        return std::make_unique<ShapeMosaic>(from, mosaic, MosaicBandForPen(pen),
                                              style.blurBlockSize);
     case tb::Id::Badge:
-        return std::make_unique<ShapeBadge>(from, ordinal, ink,
-                                            13.0f * style.dpiScale);
+        return std::make_unique<ShapeBadge>(
+            from, ordinal, ink, BadgeRadiusForPen(pen) * style.dpiScale,
+            style.dpiScale);
     default:
         return nullptr;
     }

@@ -22,6 +22,21 @@ extern const wchar_t kTextFace[];
 inline constexpr int kTextPadX = 4;
 inline constexpr int kTextPadY = 20;
 inline constexpr int kTextMinW = 40;
+// The red frame the overlay strokes 2px outside the box, plus the pixel the line
+// lands on. Part of the label to the pointer: it is the only band of the box the
+// overlay can be asked about while the input control covers the inside.
+inline constexpr int kTextFramePad = 3;
+
+// The 数字标 disc for a given stroke width: the three 粗细 dots pick three discs,
+// the middle one the size the tool had before the dots meant anything to it.
+// Design px; the shape scales it by its own dpiScale.
+Gdiplus::REAL BadgeRadiusForPen(Gdiplus::REAL pen);
+
+// The 马赛克 band's diameter for a given 粗细 dot. Four times the dot: the band is
+// what has to cover the thing being redacted, and at twice the dot the widest
+// setting was a 16px stripe against 18px text, so a band could not hide a line.
+// Design px.
+Gdiplus::REAL MosaicBandForPen(Gdiplus::REAL pen);
 
 // Rect and ellipse share a bounding box and its eight handles; only the paint
 // and the hit test differ.
@@ -155,7 +170,11 @@ public:
     std::unique_ptr<Annotation> Clone() const override;
     // The band is filled with the blurred content, so only the width of it is
     // the picker's to change; the inherited ink is a placeholder nothing draws.
-    void SetStyle(Gdiplus::Color, Gdiplus::REAL pen) override { m_pen = pen; }
+    // The dot resolves through the same function the tool used to lay the band
+    // down, so re-picking a width cannot shrink a band to the dot itself.
+    void SetStyle(Gdiplus::Color, Gdiplus::REAL pen) override {
+        m_pen = MosaicBandForPen(pen);
+    }
 
 private:
     MosaicSource* m_src;
@@ -204,13 +223,21 @@ private:
 class ShapeBadge : public Annotation {
 public:
     ShapeBadge(Gdiplus::PointF center, int number, Gdiplus::Color ink,
-               Gdiplus::REAL radius)
-        : m_center(center), m_number(number), m_ink(ink), m_r(radius) {}
+               Gdiplus::REAL radius, Gdiplus::REAL dpiScale)
+        : m_center(center), m_number(number), m_ink(ink), m_r(radius),
+          m_dpiScale(dpiScale) {}
 
     Kind GetKind() const override { return Kind::Badge; }
     void Draw(Gdiplus::Graphics& g) const override;
     bool HitTest(Gdiplus::PointF pt) const override;
     Gdiplus::RectF BBox() const override;
+    // The disc is anti-aliased, so its edge feathers about a pixel past the
+    // geometry; without the slack a moved badge leaves its old fringe behind.
+    Gdiplus::RectF InkBBox() const override {
+        const Gdiplus::RectF b = BBox();
+        return Gdiplus::RectF(b.X - 1.5f, b.Y - 1.5f, b.Width + 3.0f,
+                              b.Height + 3.0f);
+    }
     int HandleCount() const override { return 0; }
     Gdiplus::PointF HandleAt(int) const override { return Gdiplus::PointF(); }
     void MoveHandle(int, Gdiplus::PointF) override {}
@@ -220,8 +247,11 @@ public:
     }
     bool IsEmpty() const override { return false; }
     std::unique_ptr<Annotation> Clone() const override;
-    // The disc's size comes from its own radius, not the stroke width.
-    void SetStyle(Gdiplus::Color ink, Gdiplus::REAL) override { m_ink = ink; }
+    // The 粗细 dots are the badge's size picker: three widths, three discs.
+    void SetStyle(Gdiplus::Color ink, Gdiplus::REAL pen) override {
+        m_ink = ink;
+        m_r = BadgeRadiusForPen(pen) * m_dpiScale;
+    }
 
     int Number() const { return m_number; }
 
@@ -230,6 +260,7 @@ private:
     int m_number;
     Gdiplus::Color m_ink;
     Gdiplus::REAL m_r;
+    Gdiplus::REAL m_dpiScale;
 };
 
 // The 文字 tool: text at a fixed size inside a box the user owns. Committed from
@@ -250,6 +281,10 @@ public:
     // The ink is clipped to the box, so the box is both the handle geometry and
     // what has to stay inside the 选区.
     Gdiplus::RectF BBox() const override { return m_box; }
+    // The box is drawn for this kind by the overlay — the same red frame whether
+    // the label is merely selected or being edited — rather than as a selection
+    // guide, so the input surface can sit inside it without covering it.
+    bool NeedsBBoxGuide() const override { return false; }
     int HandleCount() const override { return kBoxHandles; }
     Gdiplus::PointF HandleAt(int i) const override { return BoxHandleAt(m_box, i); }
     void MoveHandle(int i, Gdiplus::PointF pt) override;
@@ -267,16 +302,23 @@ public:
     Gdiplus::Color Ink() const { return m_ink; }
     Gdiplus::REAL FontPx() const { return m_fontPx; }
     Gdiplus::PointF At() const { return Gdiplus::PointF(m_box.X, m_box.Y); }
-    // The box the inline editor ended on, adopted on commit: re-editing a label
-    // that was narrowed and then filled up has to be able to grow it again.
+    Gdiplus::RectF Box() const { return m_box; }
+    // The box the inline editor is typing into: it owns the geometry while the
+    // edit is open, and the label keeps it afterwards.
     void AdoptBox(const Gdiplus::RectF& box);
+    // Once a handle has moved, the width is the user's and typing stops growing
+    // it — re-editing a label that was narrowed has to re-open at that width.
+    bool UserSized() const { return m_userSized; }
 
-private:
+    // The metrics the inline editor has to agree with, or the text jumps when
+    // the edit closes.
     Gdiplus::REAL PadX() const;
     Gdiplus::REAL PadY() const;
     Gdiplus::REAL LineHeight() const;
-    // The wrap width: the box less the padding the editor keeps around the text.
+    // The wrap width: the box less the padding kept around the text.
     Gdiplus::REAL TextWidth() const;
+
+private:
     // Wrapped to TextWidth(), rebuilt whenever the text or the width changes —
     // BBox() and HitTest() run several times per mouse move.
     const std::vector<CString>& Lines() const;
@@ -291,6 +333,7 @@ private:
     Gdiplus::Color m_ink;
     Gdiplus::REAL m_fontPx;
     Gdiplus::REAL m_dpiScale;
+    bool m_userSized = false;
 };
 
 // Width `text` takes in the 文字 face at `fontPx`, so the inline editor can grow

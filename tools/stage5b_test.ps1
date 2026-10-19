@@ -103,22 +103,34 @@ function RedCount($bmp, [int]$x0, [int]$y0, [int]$x1, [int]$y1) {
     }
     return $n
 }
-# Longest red run along the top edge band and along the left edge band of the
-# expected frame; a real frame gives one run per side.
+# The frame is a 1px red line 2px outside the box, and the eight resize markers
+# sit on that line: three per side, each a white core that interrupts it. So the
+# frame is measured by how far its red reaches along a side and how much of it
+# there is, not by one unbroken run. Returns the two spans and the two counts.
 function FrameScan($bmp, [int]$x0, [int]$y0, [int]$x1, [int]$y1) {
-    $bestRow = 0
+    $bestRow = 0; $rowSpan = 0
     foreach ($y in ($y0 - 4)..($y0 + 4)) {
-        $n = 0
-        for ($x = $x0 - 4; $x -le $x1 + 4; $x++) { if (IsRed ($bmp.GetPixel($x, $y))) { $n++ } }
-        if ($n -gt $bestRow) { $bestRow = $n }
+        $n = 0; $lo = -1; $hi = -1
+        for ($x = $x0 - 4; $x -le $x1 + 4; $x++) {
+            if (-not (IsRed ($bmp.GetPixel($x, $y)))) { continue }
+            $n++
+            if ($lo -lt 0) { $lo = $x }
+            $hi = $x
+        }
+        if ($n -gt $bestRow) { $bestRow = $n; $rowSpan = $hi - $lo + 1 }
     }
-    $bestCol = 0
+    $bestCol = 0; $colSpan = 0
     foreach ($x in ($x0 - 4)..($x0 + 4)) {
-        $n = 0
-        for ($y = $y0 - 4; $y -le $y1 + 4; $y++) { if (IsRed ($bmp.GetPixel($x, $y))) { $n++ } }
-        if ($n -gt $bestCol) { $bestCol = $n }
+        $n = 0; $lo = -1; $hi = -1
+        for ($y = $y0 - 4; $y -le $y1 + 4; $y++) {
+            if (-not (IsRed ($bmp.GetPixel($x, $y)))) { continue }
+            $n++
+            if ($lo -lt 0) { $lo = $y }
+            $hi = $y
+        }
+        if ($n -gt $bestCol) { $bestCol = $n; $colSpan = $hi - $lo + 1 }
     }
-    return @($bestRow, $bestCol)
+    return @($rowSpan, $colSpan, $bestRow, $bestCol)
 }
 function IsAccent($c) {
     return ([Math]::Abs($c.R - 0x2E) -le 26 -and [Math]::Abs($c.G - 0x92) -le 26 -and
@@ -250,14 +262,17 @@ if ($hot2 -ne 5) { "FAIL: picked size did not stick"; exit 1 }
 Click $boxCX $boxCY   # close it again
 
 # --- press on the canvas: the red edit frame ------------------------------
-# 18px font -> edit box 40 wide, 18+20 tall at the press point, frame 2px out.
+# The 字号 picked above is 22, so the label box is 40 wide and 22+20 tall at the
+# press point, and the frame is that 2px out on every side: 45px a side.
 Click $edit[0] $edit[1]
 $s5 = Grab 'D:\Project\winshot\obj\s5b_full5.png'
 $fx0 = $edit[0] - 2; $fy0 = $edit[1] - 2
-$fx1 = $edit[0] + 40 + 2; $fy1 = $edit[1] + 18 + 20 + 2
+$fx1 = $edit[0] + 40 + 2; $fy1 = $edit[1] + 22 + 20 + 2
 $fr = FrameScan $s5 $fx0 $fy0 $fx1 $fy1
-"frame top-edge run: $($fr[0]) px (want ~44); left-edge run: $($fr[1]) px (want ~42)"
-if ($fr[0] -lt 38 -or $fr[1] -lt 36) { "FAIL: no edit frame"; exit 1 }
+"frame spans $($fr[0])x$($fr[1]) px with $($fr[2])+$($fr[3]) red px (want ~45x45, ~35 a side)"
+if ($fr[0] -lt 40 -or $fr[1] -lt 40 -or $fr[2] -lt 25 -or $fr[3] -lt 25) {
+    "FAIL: no edit frame"; exit 1
+}
 [void](Crop $s5 ($edit[0] - 40) ($edit[1] - 30) 260 100 'D:\Project\winshot\obj\s5b_editing.png')
 
 # --- type, then commit with Enter ----------------------------------------
@@ -275,7 +290,9 @@ Set-Clipboard -Value (([string][char]0x82B1) * 2)
 Start-Sleep -Milliseconds 200
 [void][System.Windows.Forms.SendKeys]::SendWait('^v')
 Start-Sleep -Milliseconds 600
-[void][System.Windows.Forms.SendKeys]::SendWait('{ENTER}')
+# Enter belongs to the control now -- it inserts a line break. Ctrl+Enter is
+# what closes the edit.
+[void][System.Windows.Forms.SendKeys]::SendWait('^({ENTER})')
 Start-Sleep -Milliseconds 600
 
 $s7 = Grab 'D:\Project\winshot\obj\s5b_full7.png'
@@ -293,9 +310,13 @@ if ($ink -lt 40 -or $corner -ne 0) { "FAIL: commit wrong"; exit 1 }
 Click $t[0] $t[1]
 DblClick ($edit[0] + 15) ($edit[1] + 12)
 $s8 = Grab 'D:\Project\winshot\obj\s5b_full8.png'
-$fr2 = FrameScan $s8 $fx0 $fy0 $fx1 $fy1
-"re-edit frame top-edge run: $($fr2[0]) px (want ~44)"
-if ($fr2[0] -lt 38) { "FAIL: double-click did not reopen the label"; exit 1 }
+# The committed label is wider than the 40px it started at, so the window has to
+# reach past the fresh frame's right edge rather than assume the old one.
+$fr2 = FrameScan $s8 $fx0 $fy0 ($fx1 + 80) $fy1
+"re-edit frame spans $($fr2[0])x$($fr2[1]) px (want >= 45 both ways)"
+if ($fr2[0] -lt 45 -or $fr2[1] -lt 40) {
+    "FAIL: double-click did not reopen the label"; exit 1
+}
 [void](Crop $s8 ($edit[0] - 40) ($edit[1] - 30) 300 100 'D:\Project\winshot\obj\s5b_reedit.png')
 
 [void][System.Windows.Forms.SendKeys]::SendWait('^a')
@@ -304,7 +325,7 @@ Start-Sleep -Milliseconds 150
 Start-Sleep -Milliseconds 400
 $s8b = Grab 'D:\Project\winshot\obj\s5b_full8b.png'
 [void](Crop $s8b ($edit[0] - 40) ($edit[1] - 30) 300 100 'D:\Project\winshot\obj\s5b_reedit_typed.png')
-[void][System.Windows.Forms.SendKeys]::SendWait('{ENTER}')
+[void][System.Windows.Forms.SendKeys]::SendWait('^({ENTER})')
 Start-Sleep -Milliseconds 500
 # The magnifier rides the cursor and the cursor is still on the label, so it
 # would hide the very thing being measured.

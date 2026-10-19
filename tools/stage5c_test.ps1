@@ -127,6 +127,11 @@ $sel = @(800, 600, 1400, 1000)
 # Three red pen lines: the structure the mosaic band has to average away.
 $lnX0 = 900; $lnX1 = 1350; $lnY = @(780, 800, 820)
 $bandAX = 1000; $bandBX = 1250; $bandY0 = 765; $bandY1 = 835
+# The witness that the mosaic leaves the rest of the canvas alone: a strip of the
+# reference lines between the two bands. The band is four times the widest dot, so
+# it reaches 16px either side of its drag line; the strip starts 24px out to stay
+# clear of that and of the second band's edge.
+$outX0 = $bandAX + 40; $outX1 = $bandAX + 125
 $fail = @()
 
 Get-ChildItem 'D:\Project\winshot\obj\s5c_*.png' -ErrorAction SilentlyContinue | Remove-Item -Force
@@ -193,7 +198,7 @@ Click ($barLeft + 63) $barMidY
 foreach ($y in $lnY) { Drag $lnX0 $y $lnX1 $y }
 $s1 = Grab 'D:\Project\winshot\obj\s5c_full1.png'
 $penAll = RedCount $s1 $lnX0 ($lnY[0] - 12) $lnX1 ($lnY[2] + 12)
-$penOut = RedCount $s1 ($bandAX - 100) ($bandY0) ($bandAX - 15) $bandY1
+$penOut = RedCount $s1 $outX0 $bandY0 $outX1 $bandY1
 $penBandB = RedCount $s1 ($bandBX - 6) ($bandY0 + 5) ($bandBX + 6) ($bandY1 - 5)
 "pen ink: all=$penAll outside=$penOut bandB=$penBandB  (want all > 3000)"
 if ($penAll -lt 3000) { $fail += 'pen strokes missing' }
@@ -213,10 +218,10 @@ for ($try = 0; $try -lt 3; $try++) {
     if ($rail -ge 90) { break }
 }
 if ($try -gt 0) { "mosaic tool click needed $try extra attempt(s); rail=$rail" }
-# The mosaic band is twice the stroke width, and the measurement window is 13px
-# wide: at the default dot the band is 8px and most of the window is untouched
-# ink at every block size, which reads as "the mosaic did nothing".
-Click ($barLeft + 63) $barMidY
+# The band is four times the width index picked above, so the widest dot lays a
+# 32px band. The 模糊度 bar shows no width dots at all — the index carries over
+# from the shape tools — which is why the dot was clicked while the 画笔 bar was
+# up. The measurement window below is 13px wide and sits inside the band.
 $label = InkCount $s2 ($barLeft + (Sx 86)) ($barTop + 8) ($barLeft + (Sx 122)) ($bb[1] - 8)
 $swatch = RedCount $s2 ($barLeft + (Sx 85)) ($barTop + 5) ($barLeft + (Sx 111)) ($barTop + 31)
 "mosaic bar: rail=$rail px (want ~110) label ink=$label (want >20) red swatch=$swatch (want 0)"
@@ -240,7 +245,7 @@ if ($blueMin -gt 12) { $fail += 'slider min fill too wide' }
 Drag $bandAX $bandY0 $bandAX $bandY1
 $s4 = Grab 'D:\Project\winshot\obj\s5c_full4.png'
 $redA = RedCount $s4 ($bandAX - 6) ($bandY0 + 5) ($bandAX + 6) ($bandY1 - 5)
-$outA = RedCount $s4 ($bandAX - 100) $bandY0 ($bandAX - 15) $bandY1
+$outA = RedCount $s4 $outX0 $bandY0 $outX1 $bandY1
 "band A (block 4): red=$redA (want > 150); outside=$outA (want $penOut)"
 if ($redA -lt 150) { $fail += 'small-block band lost the lines' }
 if ([Math]::Abs($outA - $penOut) -gt 30) { $fail += 'mosaic changed pixels outside its band' }
@@ -329,7 +334,7 @@ $png = [System.Drawing.Bitmap]::FromFile((Resolve-Path $OUT).Path)
 $ox = $sel[0]; $oy = $sel[1]
 $pA = RedCount $png ($bandAX - 6 - $ox) ($bandY0 + 5 - $oy) ($bandAX + 6 - $ox) ($bandY1 - 5 - $oy)
 $pB = RedCount $png ($bandBX - 6 - $ox) ($bandY0 + 5 - $oy) ($bandBX + 6 - $ox) ($bandY1 - 5 - $oy)
-$pOut = RedCount $png ($bandAX - 100 - $ox) ($bandY0 - $oy) ($bandAX - 15 - $ox) ($bandY1 - $oy)
+$pOut = RedCount $png ($outX0 - $ox) ($bandY0 - $oy) ($outX1 - $ox) ($bandY1 - $oy)
 "in png: bandA=$pA bandB=$pB outside=$pOut  ($($png.Width) x $($png.Height), want $($sel[2]-$sel[0]) x $($sel[3]-$sel[1]))"
 $png.Dispose()
 if ($pA -lt 150) { $fail += 'saved png lost the small-block band' }

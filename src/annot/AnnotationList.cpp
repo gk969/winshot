@@ -78,11 +78,13 @@ Gdiplus::REAL HandleSize(const Annotation& a, Gdiplus::REAL base) {
     }
 }
 
-void DrawSelection(Gdiplus::Graphics& g, const Annotation& a, Gdiplus::REAL base) {
+void DrawSelection(Gdiplus::Graphics& g, const Annotation& a, Gdiplus::REAL base,
+                   bool handles) {
     if (a.NeedsBBoxGuide()) {
         Gdiplus::Pen box(kSel, 1.0f);
         g.DrawRectangle(&box, a.BBox());
     }
+    if (!handles) return;
 
     const Gdiplus::REAL r = HandleSize(a, base);
     Gdiplus::SolidBrush core(0xFFFFFFFF);
