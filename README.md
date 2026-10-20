@@ -18,8 +18,6 @@ Release 版是单个可执行文件，没有安装程序，也不需要额外运
 
 **下载：** [winshot.exe](https://raw.githubusercontent.com/gk969/winshot/master/x64/Release/winshot.exe)
 
-> 上面这个地址就是仓库里的 `x64\Release\winshot.exe`：这个二进制现在跟源码一起提交在仓库里，所以不建 release 也能下载，而且它和同一提交里的源码对得上。代价是每次改完代码都要重新构建并把 exe 再提交一次，否则下载到的就是旧版——`.gitignore` 里为此只放行了这一个文件，`x64\Debug\` 和 `.pdb` 之类照旧不入库。**这条链接要等这次提交推上 GitHub 之后才点得开。** 想要更正式的下载地址，仍然可以在 GitHub 上建一个 release，把 exe 以 `winshot.exe` 这个名字作为资源传上去，`releases/latest/download/<名字>` 里的 `<名字>` 必须和资源文件名一字不差。
-
 运行环境：Windows 10 / 11 x64。OCR 需要系统装了对应的 `Windows.Media.Ocr` 语言包（中文识别需要中文 OCR 组件）。
 
 ---
@@ -236,6 +234,7 @@ winshot/
 ├── winshot.rc              只有一条 ICON 语句（不含 manifest，见下）
 ├── resource.h              IDI_APP_ICON
 ├── app.manifest            PerMonitorV2 DPI + asInvoker
+├── x64/Release/winshot.exe 入库的 Release 产物，README 的下载链接就是它
 └── README.md
 ```
 
@@ -247,7 +246,7 @@ winshot/
 | `winshot.rc` | 只声明 `IDI_APP_ICON ICON "res\winshot.ico"`。纯 ASCII（源 PNG 保留中文名，`.rc` 里只写 ASCII 路径，免得 rc.exe 在编码上找麻烦）。 |
 | `resource.h` | 只有 `IDI_APP_ICON 101` 一个 ID。 |
 | `app.manifest` | `PerMonitorV2` + `asInvoker`。 |
-| `.gitignore` | `obj/ x64/ Debug/ Release/ .vs/` 和构建产物。`res/`、`*.ico`、`*.rc` 都不忽略——`.ico` 是构建输入，必须入库，不能构建时现生成。 |
+| `.gitignore` | `obj/`、`x64/Debug/`、`Debug/`、`/Release/`、`.vs/`、`*.obj`、`*.exe`、`*.pdb`、`*.ilk`、`*.exp`、`*.lib`。`res/`、`*.ico`、`*.rc` 都不忽略——`.ico` 是构建输入，必须入库，不能构建时现生成。唯一的例外是 `!x64/Release/winshot.exe`：README 的下载链接指向的就是仓库里的这个文件，所以每次改完代码都要重新构建 Release 并把它一起提交，否则下载到的是旧版。旁边 29 MB 的 `.pdb` 照旧被 `*.pdb` 挡在外面。 |
 
 ### `src/` 顶层
 
@@ -267,12 +266,12 @@ winshot/
 | --- | --- |
 | `CaptureSession.h` / `.cpp` | 一次会话的全部状态：still、选区、标注列表、撤销栈、装着的工具、属性条样式、文字编辑器、字号下拉、马赛克缓存。**所有标注改动都必须走 `Push*` / `Record*` 这一对**，撤销栈才不会和列表走散。`OnToolbar` 是工具栏槽位点击的唯一入口。`ResetCanvas` 实现框外右键的全量重置。 |
 | `SelectionModel.h` / `.cpp` | 选区几何：8 手柄命中测试、内部移动、缩放、方向键微调、`IsDefault`（还没碰过）、`SetKeepIn`（不能缩到比已画元素小）。 |
-| `OverlayWnd.h` / `.cpp` | 最大的一个文件（约 2200 行）：全屏覆盖层、三缓冲绘制、dim 的 SSE2 实现、全部鼠标键盘手势、光标形状、选区框与元素框、悬停预选框、尺寸标签、字号下拉、长截图的洞与 topmost 守卫。`DibCanvas` 结构也在这里。 |
+| `OverlayWnd.h` / `.cpp` | 最大的一个文件（约 2300 行）：全屏覆盖层、三缓冲绘制、dim 的 SSE2 实现、全部鼠标键盘手势、光标形状、选区框与元素框、悬停预选框、尺寸标签、字号下拉、长截图的洞与 topmost 守卫。`DibCanvas` 结构也在这里。 |
 | `Toolbar.h` | 界面共享词汇表：槽位枚举、从参考图量的全部度量、16 色色板、粗细三档、字号列表的换算、马赛克滑块的度量、默认样式（红色 + 中间那档粗细 + 18 号 + block 12）。 |
 | `ToolbarWnd.h` / `.cpp` | 工具栏窗：槽位表、自绘按钮、命中测试、hover 高亮、tooltip 定时器、`Place(belowHeight)` 的翻边判断。 |
 | `PropertyBarWnd.h` / `.cpp` | 属性条窗：三种布局（形状 / 文字 / 马赛克）、粗细点、色块、字号框（拆成 ▼ 条和可输入区两段）、模糊度滑块。字号输入框 `CFontEdit` 只收数字。 |
 | `Glyphs.h` / `.cpp` | 工具栏图标的矢量绘制。 |
-| `TextEditor.h` / `.cpp` | 文字输入面 `CTextEditor`（透明窗，自己用 `BltBase` 要背景）+ 里面的 `CTEditBox`（`Enter` 插换行、`Ctrl+Enter` 提交、双击打开时把光标放文末）。 |
+| `TextEditor.h` / `.cpp` | 文字输入面 `CTextEditor`（透明窗，自己用 `BltBase` 要背景）+ 里面的 `CTEditBox`（`Enter` 插换行、`Ctrl+Enter` 提交、双击打开时把光标放文末，而已经打开的编辑框里第一次点击落在点的地方——那个一次性标记在 `OnLButtonDown` 花掉；每次 `EN_CHANGE` 收尾补一次 `Invalidate()`，否则退格和字中间的回车留残影）。 |
 | `Loupe.h` / `.cpp` | 放大镜卡片：`CardRect`（含靠边镜像）、`Sampled`、`Draw`、`CopyColor`。 |
 | `WindowPick.h` / `.cpp` | `TopWindowUnder`：按真实 z-order 找光标下最顶的合格窗口，返回它的可见边界。 |
 | `MosaicCache.h` / `.cpp` | 马赛克笔画采样的方块化位图缓存。 |
@@ -330,7 +329,7 @@ winshot/
 
 ## 开发调试迭代经过
 
-项目从 2026-10-15 起，六天，九次提交。下面按实际经过记，包括走过的弯路。
+项目从 2026-10-15 起，七天，十次提交。下面按实际经过记，包括走过的弯路。
 
 ### 10-15：一次把整条链路搭起来
 
@@ -451,6 +450,10 @@ cl /EHsc /std:c++20 /W4 /source-charset:utf-8 /Fe:obj\stitcher_test.exe /Fo:obj\
 powershell -NoProfile -File tools\stage2_test.ps1
 ```
 
+全量跑一遍是把它们串起来一条一条跑——脚本驱动的是全局鼠标、抓的是全屏，两条同时跑会互相踩。顺序有讲究：先跑容差敏感的 `text_wrap drag_clamp arrow_taper`，再按上面的分组扫，最后单独跑会动真实窗口的那几条（`hover_pick click_full hover_default toolbar_gated rect_hairline tray_rclick`）。
+
+新脚本入库前过两道当场能查的门：`System.Management.Automation.Language.Parser::ParseFile` 报 0 个语法错，以及文件是纯 ASCII。第二道不是洁癖——PowerShell 5.1 把无 BOM 的 `.ps1` 按 ANSI 读，注释里一个中文词就能把整行读坏，而且报出来的错看不出跟那个词有什么关系。
+
 脚本假设显示器是 3840×2160 @ 96 DPI（此时 `Dpi::S(hwnd,n) == n`，覆盖层 client 空间等于屏幕空间），每条像素断言都建立在这上面。有两条历史上比较飘：`tray_rclick` 在任务栏条里按像素形状找图标（托盘布局每次不同，而且选区蓝并不是它独有的颜色——同一条里蓝牙和手机互传的图标也过同一个判据，真正认出我们那个的是四行菜单），`font_size` 在"字体列表按完之后紧接着双击"那一步偶尔失败。单条失败重跑一次即可。锁屏会让一整批脚本同时失败（屏幕全黑、合成输入送不进去），别把它读成八条回归。
 
 ---
@@ -462,4 +465,6 @@ powershell -NoProfile -File tools\stage2_test.ps1
 * **多显示器混合 DPI**：跨屏的覆盖层只拿到主屏 DPI。因为全部几何都用物理像素，覆盖层本身每屏都对；只有内联文字编辑框在异 DPI 屏上字号会略偏。
 * **长截图会把吸顶表头、固定页脚这类内容重复拼进去**，需要事后手动裁剪。
 * **1px 矩形在拖动过程中可能左右跳一列**：形状盒是浮点，aliased 输出会吸附而不是羽化。提交之后坐标固定，不会抖。
-* **文本框的留白是实测常数，换环境要重量**：`kTextPadY = 3` 对齐的是 GDI 与 GDI+ 各自的下伸部留白，行格（18px 字号 24、22px 字号 30）取的是两个引擎行高的大值——两者都只在 3840×2160 @ 96 DPI、`kTextFace` 这一个字体下量过。换 DPI 或换编译期字体，最后一行的下边距会跟着偏。
+* **文本框的留白是实测常数，换环境要重量**：`kTextPadY = 3` 对齐的是 GDI 与 GDI+ 各自的下伸部留白，行格（18px 字号 24、22px 字号 30）取的是两个引擎行高的大值——两者都只在 3840×2160 @ 96 DPI、`kTextFace`（`Microsoft YaHei UI`）这一个字体下量过。换 DPI 或换编译期字体，最后一行的下边距会跟着偏。
+* **没有设置界面，也不存设置**：颜色、粗细、字号、马赛克块大小每次呼出都回到默认（红 + 中间那档 + 18 号 + block 12），热键固定 `Ctrl+Shift+A` 改不了。整个程序只往注册表写一个值——开机启动的 `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` 的 `WinShot`。
+* **exe 没有版本资源**：`winshot.rc` 里只有那条 ICON 语句，没有 `VS_VERSION_INFO`，所以文件属性的"文件版本 / 产品名称 / 描述"全是空白，任务管理器和"设置 → 应用"里只能看到 `winshot.exe` 这个文件名。
