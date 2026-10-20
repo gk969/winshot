@@ -269,15 +269,20 @@ if ($hot2 -ne (FontRow 22)) { "FAIL: picked size did not stick"; exit 1 }
 Click $arrowX $boxCY   # close it again
 
 # --- press on the canvas: the red edit frame ------------------------------
-# The 字号 picked above is 22, so the label box is 40 wide and 22+20 tall at the
-# press point, and the frame is that 2px out on every side: 45px a side.
+# The 字号 picked above is 22. The label box at the press point is kTextMinW's 40
+# wide and one line cell tall, and the frame the label is shown in is that
+# kEditFramePad's 3 out on every side -- so 46x39. The cell is a measured 30px and
+# not fontPx: the box used to be fontPx + 20, which is why this wanted 45x45. The
+# scan window below stays sized for the taller box it once had; FrameScan reads the
+# frame's own extent out of the widest red row and column, so a window that is roomy
+# costs nothing, and the two corners it also probes are the frame's, 2px out.
 Click $edit[0] $edit[1]
 $s5 = Grab 'D:\Project\winshot\obj\s5b_full5.png'
 $fx0 = $edit[0] - 2; $fy0 = $edit[1] - 2
 $fx1 = $edit[0] + 40 + 2; $fy1 = $edit[1] + 22 + 20 + 2
 $fr = FrameScan $s5 $fx0 $fy0 $fx1 $fy1
-"frame spans $($fr[0])x$($fr[1]) px with $($fr[2])+$($fr[3]) red px (want ~45x45, ~35 a side)"
-if ($fr[0] -lt 40 -or $fr[1] -lt 40 -or $fr[2] -lt 25 -or $fr[3] -lt 25) {
+"frame spans $($fr[0])x$($fr[1]) px with $($fr[2])+$($fr[3]) red px (want 46x39, ~35 a side)"
+if ($fr[0] -lt 40 -or $fr[1] -lt 34 -or $fr[2] -lt 25 -or $fr[3] -lt 25) {
     "FAIL: no edit frame"; exit 1
 }
 [void](Crop $s5 ($edit[0] - 40) ($edit[1] - 30) 260 100 'D:\Project\winshot\obj\s5b_editing.png')
@@ -320,8 +325,8 @@ $s8 = Grab 'D:\Project\winshot\obj\s5b_full8.png'
 # The committed label is wider than the 40px it started at, so the window has to
 # reach past the fresh frame's right edge rather than assume the old one.
 $fr2 = FrameScan $s8 $fx0 $fy0 ($fx1 + 80) $fy1
-"re-edit frame spans $($fr2[0])x$($fr2[1]) px (want >= 45 both ways)"
-if ($fr2[0] -lt 45 -or $fr2[1] -lt 40) {
+"re-edit frame spans $($fr2[0])x$($fr2[1]) px (want >= 45 wide, >= 34 tall)"
+if ($fr2[0] -lt 45 -or $fr2[1] -lt 34) {
     "FAIL: double-click did not reopen the label"; exit 1
 }
 [void](Crop $s8 ($edit[0] - 40) ($edit[1] - 30) 300 100 'D:\Project\winshot\obj\s5b_reedit.png')
@@ -432,5 +437,18 @@ $png = [System.Drawing.Bitmap]::FromFile((Resolve-Path $OUT).Path)
 "saved png $($png.Width) x $($png.Height)  (want $($sel[2]-$sel[0]) x $($sel[3]-$sel[1]))"
 $png.Dispose()
 
+# A save ends the capture; the program stays in the tray so the hotkey works again.
+# "Still running" is true either way, so the overlay count is the assertion here.
+$found = New-Object System.Collections.ArrayList
+$wcb = [W5B+EnumProc] {
+    param($h, $l)
+    $t = New-Object System.Text.StringBuilder 256
+    [void][W5B]::GetWindowText($h, $t, 256)
+    if ($t.ToString() -eq 'WinShotOverlay') { [void]$found.Add($h) }
+    return $true
+}
+[void][W5B]::EnumWindows($wcb, [IntPtr]::Zero)
+"overlay windows after the save: $($found.Count)  (want 0)"
 "winshot still running: $(-not $proc.HasExited)"
 if (-not $proc.HasExited) { $proc.Kill() }
+if ($found.Count) { "FAIL: the save left the overlay up"; exit 1 }

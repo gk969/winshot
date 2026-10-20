@@ -168,8 +168,14 @@ void CaptureSession::Save() {
 
     // The common dialog is not topmost, so the overlay has to step down for it.
     m_overlay.SetTopmost(false);
-    out::SaveWithDialog(*bmp, m_overlay.GetSafeHwnd());
-    m_overlay.SetTopmost(true);
+    if (out::SaveWithDialog(*bmp, m_overlay.GetSafeHwnd())) {
+        // The file is on disk, so this capture is over -- the same way 完成 ends
+        // it. Nothing is put back on top: Finish only posts to the sink window,
+        // and the sink tears the overlay down outside this message handler.
+        Finish(true);
+        return;
+    }
+    m_overlay.SetTopmost(true);  // 取消 the dialog: nothing happened.
 }
 
 void CaptureSession::Pin() {
@@ -253,13 +259,19 @@ void CaptureSession::BeginTextEdit(CPoint at, annot::ShapeText* target) {
     if (!target) {
         // The box grows right and down from the press point, so a click near the
         // frame's right or bottom edge has to start back far enough for its first
-        // line to be inside the 选区 at all.
+        // line to be inside the 选区 at all. The other two edges need the room the
+        // two frames take up between them: a label created on the edge would carry
+        // its red frame under the 选区's own until it was dragged.
         CPoint origin = at;
         const CRect sel(m_sel->Rect());
-        origin.x =
-            std::min<LONG>(origin.x, sel.right - Dpi::S(hw, annot::kTextMinW));
-        origin.y = std::min<LONG>(origin.y,
-                                  sel.bottom - fontPx - Dpi::S(hw, annot::kTextPadY));
+        const int pad = (int)(annot::kFrameClearance + annot::kEditFramePad);
+        const Gdiplus::REAL oneLine = annot::TextHeight(
+            (Gdiplus::REAL)fontPx, (Gdiplus::REAL)Dpi::S(hw, annot::kTextPadY), 1);
+        origin.x = std::max<LONG>(origin.x, sel.left + pad);
+        origin.y = std::max<LONG>(origin.y, sel.top + pad);
+        origin.x = std::min<LONG>(origin.x,
+                                  sel.right - pad - Dpi::S(hw, annot::kTextMinW));
+        origin.y = std::min<LONG>(origin.y, sel.bottom - pad - (LONG)oneLine);
         // The label joins the list before the edit opens, so the box on screen
         // while typing is the label's own — frame, markers and all. There is then
         // one geometry for the text, and resizing it mid-edit moves the caret with
@@ -268,7 +280,7 @@ void CaptureSession::BeginTextEdit(CPoint at, annot::ShapeText* target) {
             std::make_unique<annot::ShapeText>(
                 Gdiplus::RectF((Gdiplus::REAL)origin.x, (Gdiplus::REAL)origin.y,
                                (Gdiplus::REAL)Dpi::S(hw, annot::kTextMinW),
-                               (Gdiplus::REAL)(fontPx + Dpi::S(hw, annot::kTextPadY))),
+                               oneLine),
                 CString(), m_style.Color(), (Gdiplus::REAL)fontPx,
                 m_style.dpiScale)));
         m_newText = m_annos.IndexOf(target);

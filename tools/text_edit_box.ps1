@@ -220,10 +220,14 @@ function Ink-Bands($bmp, [int]$l, [int]$t, [int]$r, [int]$b) {
     # the hashtable itself, whose Count is its four keys and reads as four lines.
     return ,$bands
 }
-# The bands of a label's own box, with the chrome left out. While editing, the eight
-# square markers straddle the box edge and reach 3px inside it, so an inset narrower
-# than that counts their rows as text lines; the ink itself starts 5px in from the
-# top and left, so 4 in and 5 back keeps every glyph.
+# The bands of a label's own box, with the chrome left out. While editing the eight
+# square markers straddle the box edge, and their outline -- not their white core --
+# is what passes IsInk: measured on a box ending at 751, it lands on rows 748 and
+# 749, so an inset under 3 counts the bottom marker as a line of its own. The ink's
+# own bottom gap depends on the text: 9px for a line of Ws, 5px once descenders
+# reach down. 5 in from every edge is the widest inset that still keeps every glyph
+# of the tallest line, and it is what the caret test below needs the last band's
+# right edge to be the last glyph rather than a marker.
 function Label-Bands($bmp, $box) {
     return Ink-Bands $bmp ($box.left + 4) ($box.top + 4) ($box.right - 5) ($box.bottom - 5)
 }
@@ -264,14 +268,24 @@ function Marker-Points($box) {
 # Which of the eight marker positions show a white core. Returns a hashtable
 # rather than the bare list: a function's output is collected, so a status line
 # printed here would land in the caller's variable alongside the result.
-function White-Cores($bmp, $box) {
-    $on = @(); $miss = @()
+#
+# $ref is a grab taken before the label existed, so it is the frozen screen with no
+# frame and no markers on it. A marker core is white, so where the screen behind it
+# is white too the core is invisible and the probe says nothing at all: on
+# 2026-10-21 a maximized Notepad++ sat over the label and all eight points read
+# 255,255,255 with the markers off, which failed the two "no markers" states and
+# made the third vacuous. Such a point is reported as void and left out of the
+# count, and the caller says so when that leaves nothing to check.
+function White-Cores($bmp, $box, $ref) {
+    $on = @(); $miss = @(); $void = @()
     foreach ($m in Marker-Points $box) {
-        $c = $bmp.GetPixel($m.x + $m.dx, $m.y + $m.dy)
+        $px = $m.x + $m.dx; $py = $m.y + $m.dy
+        if (IsWhite ($ref.GetPixel($px, $py))) { $void += $m.n; continue }
+        $c = $bmp.GetPixel($px, $py)
         if (IsWhite $c) { $on += $m.n }
-        else { $miss += "$($m.n)@$($m.x + $m.dx),$($m.y + $m.dy)=$($c.R),$($c.G),$($c.B)" }
+        else { $miss += "$($m.n)@$($px),$($py)=$($c.R),$($c.G),$($c.B)" }
     }
-    return @{ on = $on; miss = $miss }
+    return @{ on = $on; miss = $miss; void = $void; n = (8 - $void.Count) }
 }
 $fail = @()
 
@@ -292,6 +306,11 @@ if ($ov.Count -eq 0) { 'FAIL: no overlay window'; exit 1 }
 Drag 700 500 2200 1500
 $p = Slot 5
 if (-not $p) { 'FAIL: no toolbar'; exit 1 }
+# The screen as it stands with a region picked and nothing drawn inside it: the same
+# frozen still every later grab reads, but with no label on it. White-Cores uses it to
+# tell a marker core from a white background. Held for the whole run, because the
+# boxes the three states probe are not known yet.
+$ref = Grab 'D:\Project\winshot\obj\teb_bare.png'
 Click $p[0] $p[1]              # the text tool
 Click 900 700
 $ed = Editor
@@ -404,9 +423,9 @@ Start-Sleep -Milliseconds 500
 MoveTo 2300 1800; Start-Sleep -Milliseconds 400
 $g = Grab 'D:\Project\winshot\obj\teb_committed.png'
 $f0 = Frame-Red $g $box4
-$c0 = White-Cores $g $box4
+$c0 = White-Cores $g $box4 $ref
 $g.Dispose()
-"after commit: frame line $($f0.pct)% red (want 0), cores $($c0.on.Count)/8"
+"after commit: frame line $($f0.pct)% red (want 0), cores $($c0.on.Count)/$($c0.n) (want 0; $($c0.void.Count) of 8 sit on a white background and cannot be told)"
 if ($f0.pct -gt 5) {
     $fail += "the committed label still draws its red frame: $($f0.pct)% of the frame line is red"
 }
@@ -420,9 +439,9 @@ Start-Sleep -Milliseconds 500
 MoveTo 2300 1800; Start-Sleep -Milliseconds 400
 $g = Grab 'D:\Project\winshot\obj\teb_selected.png'
 $f1 = Frame-Red $g $box4
-$c1 = White-Cores $g $box4
+$c1 = White-Cores $g $box4 $ref
 $g.Dispose()
-"single click: frame line $($f1.pct)% red (want over 90), cores $($c1.on.Count)/8 (want 0)"
+"single click: frame line $($f1.pct)% red (want over 90), cores $($c1.on.Count)/$($c1.n) (want 0)"
 if ($f1.pct -lt 90) {
     $fail += "a selected label draws its red frame on only $($f1.pct)% of the frame line, want the whole of it"
 }
@@ -445,16 +464,24 @@ $box5 = Edit-Box $ed5
 MoveTo 2300 1800; Start-Sleep -Milliseconds 400
 $g = Grab 'D:\Project\winshot\obj\teb_editing.png'
 $f2 = Frame-Red $g $box5
-$c2 = White-Cores $g $box5
+$c2 = White-Cores $g $box5 $ref
 $g.Dispose()
-"editing: frame line $($f2.pct)% red, cores $($c2.on.Count)/8 $(($c2.miss) -join ' ')"
+"editing: frame line $($f2.pct)% red, cores $($c2.on.Count)/$($c2.n) (want all; $($c2.void.Count) of 8 sit on a white background) $(($c2.miss) -join ' ')"
 # Not 100%: the eight markers sit on the box edge and each one paints over the
 # frame line where it crosses, which is around 8% of the line's length.
 if ($f2.pct -lt 85) {
     $fail += "the label being edited draws its red frame on only $($f2.pct)% of the frame line"
 }
-if ($c2.on.Count -ne 8) {
-    $fail += "the label being edited shows markers at $(($c2.on) -join ' ') - all eight corners and edges want one; missing: $(($c2.miss) -join ' ')"
+# This is the state that says whether the probe can see a marker anywhere at all, so
+# it is where a wholly white background is reported: the two "no markers" states above
+# would have passed on any background, and this one cannot.
+if ($c2.n -eq 0) {
+    "FAIL: every marker point sits on a white background, so a white marker core cannot be told from the screen behind the label at $($box5.left),$($box5.top) .. $($box5.right),$($box5.bottom)"
+    if (-not $proc.HasExited) { $proc.Kill() }
+    exit 1
+}
+if ($c2.on.Count -ne $c2.n) {
+    $fail += "the label being edited shows markers at $(($c2.on) -join ' ') - every one of the $($c2.n) points that is not on a white background wants one; missing: $(($c2.miss) -join ' ')"
 }
 $my5 = [int](($box5.top + $box5.bottom) / 2)
 MoveTo ([int](($box5.left + $box5.right) / 2)) $my5

@@ -76,6 +76,26 @@ function RedCount($bmp, [int]$x0, [int]$y0, [int]$x1, [int]$y1) {
     return $n
 }
 
+# Our own windows by title. A save now ends the capture, so the script has to be able
+# to say the overlay is gone -- "the process is still up" is true either way and says
+# nothing about it.
+function Wins([string]$title) {
+    $found = New-Object System.Collections.ArrayList
+    $cb = [W4+EnumProc] {
+        param($h, $l)
+        $t = New-Object System.Text.StringBuilder 256
+        [void][W4]::GetWindowText($h, $t, 256)
+        if ($t.ToString() -eq $title) { [void]$found.Add($h) }
+        return $true
+    }
+    [void][W4]::EnumWindows($cb, [IntPtr]::Zero)
+    return $found.ToArray()
+}
+function Summon() {
+    [void][W4]::PostMessage($sink[0], 0x8002, [IntPtr]::Zero, [IntPtr]::Zero)
+    Start-Sleep -Seconds 2
+}
+
 $OUT = 'D:\Project\winshot\obj\s4_out.png'
 if (Test-Path $OUT) { Remove-Item $OUT }
 
@@ -128,37 +148,12 @@ $after = RedCount $s3 $edge[0] $edge[1] $edge[2] $edge[3]
 "after Ctrl+Z: $after  (want 0)"
 
 Drag 900 700 1200 900        # draw it again
-[void][System.Windows.Forms.SendKeys]::SendWait('^s')
-Start-Sleep -Seconds 2
-[void][System.Windows.Forms.SendKeys]::SendWait('{HOME}+{END}')
-[void][System.Windows.Forms.SendKeys]::SendWait($OUT)
-[void][System.Windows.Forms.SendKeys]::SendWait('{ENTER}')
-Start-Sleep -Seconds 2
 
-if (-not (Test-Path $OUT)) { "FAIL: Ctrl+S wrote no file"; exit 1 }
-$png = [System.Drawing.Bitmap]::FromFile((Resolve-Path $OUT).Path)
-"saved png $($png.Width) x $($png.Height)  (want $($sel[2]-$sel[0]) x $($sel[3]-$sel[1]))"
+# The tick and Ctrl+S are two different exits and only one of them can follow a
+# drawing, so the tick comes first and the save gets a capture of its own below.
 $ox = $sel[0]; $oy = $sel[1]
-$inSel = RedCount $png (950-$ox) (694-$oy) (1150-$ox) (706-$oy)
-"red pixels in the png at the same spot: $inSel  (want > 150)"
-
-# The crop comes from the frozen still, so none of the overlay chrome — the blue
-# selection frame in particular — may appear in it.
-function IsFrame($c) { return ($c.B -gt 180 -and $c.G -gt 130 -and $c.R -lt 90) }
-$frame = 0
-for ($i = 0; $i -lt 4; $i++) {
-    foreach ($c in @($png.GetPixel($i, $i), $png.GetPixel($png.Width-1-$i, $i),
-                     $png.GetPixel($i, $png.Height-1-$i),
-                     $png.GetPixel($png.Width-1-$i, $png.Height-1-$i))) {
-        if (IsFrame $c) { $frame++ }
-    }
-}
-"blue selection-frame pixels inside the crop: $frame  (want 0)"
-$png.Dispose()
-
 [System.Windows.Forms.Clipboard]::Clear()
 Start-Sleep -Milliseconds 300
-Click 1600 1200              # insurance: hand the overlay the focus back
 [void][System.Windows.Forms.SendKeys]::SendWait('{ENTER}')   # tick = clipboard + close
 Start-Sleep -Seconds 2
 
@@ -180,6 +175,45 @@ else {
         "FAIL: no Bitmap on the clipboard"
     }
 }
+if (@(Wins 'WinShotOverlay').Count) { "FAIL: the tick left the overlay up" }
 
+# --- a second capture, for the save -------------------------------------------------
+# The region is dragged identically, so the toolbar lands where it did before and the
+# rect slot keeps the coordinates found above.
+Summon
+Drag 800 600 1400 1000
+Click $firstX $midY          # arm the rect tool on the new toolbar
+Drag 900 700 1200 900
+[void][System.Windows.Forms.SendKeys]::SendWait('^s')
+Start-Sleep -Seconds 2
+[void][System.Windows.Forms.SendKeys]::SendWait('{HOME}+{END}')
+[void][System.Windows.Forms.SendKeys]::SendWait($OUT)
+[void][System.Windows.Forms.SendKeys]::SendWait('{ENTER}')
+Start-Sleep -Seconds 2
+
+if (-not (Test-Path $OUT)) { "FAIL: Ctrl+S wrote no file"; exit 1 }
+$png = [System.Drawing.Bitmap]::FromFile((Resolve-Path $OUT).Path)
+"saved png $($png.Width) x $($png.Height)  (want $($sel[2]-$sel[0]) x $($sel[3]-$sel[1]))"
+$inSel = RedCount $png (950-$ox) (694-$oy) (1150-$ox) (706-$oy)
+"red pixels in the png at the same spot: $inSel  (want > 150)"
+
+# The crop comes from the frozen still, so none of the overlay chrome — the blue
+# selection frame in particular — may appear in it.
+function IsFrame($c) { return ($c.B -gt 180 -and $c.G -gt 130 -and $c.R -lt 90) }
+$frame = 0
+for ($i = 0; $i -lt 4; $i++) {
+    foreach ($c in @($png.GetPixel($i, $i), $png.GetPixel($png.Width-1-$i, $i),
+                     $png.GetPixel($i, $png.Height-1-$i),
+                     $png.GetPixel($png.Width-1-$i, $png.Height-1-$i))) {
+        if (IsFrame $c) { $frame++ }
+    }
+}
+"blue selection-frame pixels inside the crop: $frame  (want 0)"
+$png.Dispose()
+
+# A save ends the capture; the program stays in the tray so the hotkey works again.
+$left = @(Wins 'WinShotOverlay').Count
+"overlay windows after the save: $left  (want 0)"
+if ($left -ne 0) { "FAIL: the save left the overlay up" }
 "winshot still running: $(-not $p.HasExited)"
 if (-not $p.HasExited) { $p.Kill() }

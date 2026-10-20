@@ -30,6 +30,13 @@ public static class TW {
 
 $LEFTDOWN = 0x0002; $LEFTUP = 0x0004
 
+# Mirrors annot::kTextPadY. The single-line box is one whole line cell plus this
+# much, so subtracting it from a measured box height yields the line pitch -- which
+# is what every growth assertion below needs. It is a mirror and not a measurement
+# only because the alternative is to derive the pitch from two box heights and lose
+# the assertion's meaning if the box never grows.
+$PADY = 3
+
 function Grab([string]$path) {
     $b = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds
     $bmp = New-Object System.Drawing.Bitmap $b.Width, $b.Height
@@ -226,26 +233,33 @@ Start-Sleep -Milliseconds 900
 $r1 = Edit-Box $ed
 
 "after 143 chars: box $($r1.left),$($r1.top) .. $($r1.right),$($r1.bottom), height $h0 -> $($r1.bottom - $r1.top)"
-if ($r1.right -gt 1602) { $fail += "the box ran past the region's right edge: right=$($r1.right), limit 1600" }
-if ($r1.right -lt 1580) { $fail += "the box stopped at $($r1.right) instead of using the region's width" }
-# The single-line box is fontPx + 20 of padding, so the font size is known and a
-# line height is at least that. Two more lines is the least wrapping 143 characters
-# at this width can produce.
+# The right limit is 1595 for the same reason the bottom one is 1395 further down.
+if ($r1.right -gt 1597) { $fail += "the box ran past the region's right edge: right=$($r1.right), limit 1595" }
+if ($r1.right -lt 1575) { $fail += "the box stopped at $($r1.right) instead of using the region's width" }
+# The single-line box is one line cell plus $PADY, so $h0 - $PADY is the line pitch
+# exactly and two more lines is the least wrapping 143 characters at this width can
+# produce. Asserting against the pitch rather than a fraction of the box height
+# matters now that the box is only a line tall: the old bound was a third of it.
 $h1 = $r1.bottom - $r1.top
-if ($h1 - $h0 -lt 2 * ($h0 - 20)) {
+$lh = $h0 - $PADY
+if ($h1 - $h0 -lt 2 * $lh) {
     $fail += "the box did not grow down: height $h0 -> $h1, want at least two more lines"
 }
 
 # --- commit, then narrow the label from its right marker ---------------------
 # More text first: the narrowing test wants enough of it that rows genuinely stop
 # fitting. The box the editor ends on is the label's box, so its markers are known
-# exactly, and the inset keeps the measurement clear of the frame -- the line is
-# 2px outside the box and the markers reach 5px past it.
+# exactly. The inset has to stay clear of the eight markers, which reach 5px inside
+# the box edge, and still hold every line of ink, which since the padding was
+# tightened ends 5px above the bottom edge as well. The two constraints meet, so the
+# bottom inset sits inside the marker band and lets the bottom marker's row merge
+# into the last ink band; that is cheaper than cutting the last line, and every
+# assertion here compares the same window before and after, so the markers cancel.
 Keys ('abcdefghij ' * 10)
 Start-Sleep -Milliseconds 900
 $box = Edit-Box $ed
 
-$il = $box.left + 8; $it = $box.top + 8; $ir = $box.right - 9; $ib = $box.bottom - 9
+$il = $box.left + 8; $it = $box.top + 8; $ir = $box.right - 9; $ib = $box.bottom - 4
 MoveTo 2300 1800; Start-Sleep -Milliseconds 300
 $g0 = Grab 'D:\Project\winshot\obj\tw_before_narrow.png'
 $n0 = RedCount $g0 $il $it $ir $ib
@@ -309,8 +323,8 @@ if ($below1 -gt $below0 + 20) {
 
 # --- and past the region's bottom it stops taking characters ------------------
 # A fresh label, below the first so the two boxes do not overlap. Rounds of 440
-# characters until the box can no longer grow: at about 50 characters a line and
-# 23px a line this needs on the order of 1000 of them to reach 1400.
+# characters until the box can no longer grow: at about 50 characters a line and one
+# line cell ($lh px) a line this needs on the order of 1000 of them to reach 1400.
 Click $p[0] $p[1]              # re-arm the text tool
 Click 950 900
 $ed2 = Editor
@@ -334,7 +348,9 @@ for ($round = 0; $round -lt 6; $round++) {
     Start-Sleep -Milliseconds 900
     $r3 = Edit-Box $ed2
     $gA = Grab ('D:\Project\winshot\obj\tw_at_bottom' + $round + '.png')
-    $inkA = RedCount $gA ($r3.left + 8) ($r3.top + 8) ($r3.right - 9) ($r3.bottom - 9)
+    # -4 and not -9 on the bottom: the last line's ink now ends 5px above the box,
+    # so a deeper inset would stop counting the very line this loop is watching.
+    $inkA = RedCount $gA ($r3.left + 8) ($r3.top + 8) ($r3.right - 9) ($r3.bottom - 4)
     $gA.Dispose()
     if ([Math]::Abs($inkA - $inkPrev) -le 60) { $stable = $true; break }
     $inkPrev = $inkA
@@ -343,13 +359,20 @@ Keys ('uvwxyz ' * 40)
 Start-Sleep -Milliseconds 900
 $r4 = Edit-Box $ed2
 $gB = Grab 'D:\Project\winshot\obj\tw_past_bottom.png'
-$inkB = RedCount $gB ($r4.left + 8) ($r4.top + 8) ($r4.right - 9) ($r4.bottom - 9)
+$inkB = RedCount $gB ($r4.left + 8) ($r4.top + 8) ($r4.right - 9) ($r4.bottom - 4)
 $gB.Dispose()
-"at the bottom: box bottom $($r3.bottom) (limit 1400), $inkA red px; after 280 more: bottom $($r4.bottom), $inkB red px"
-if ($r3.bottom -lt 1390) {
-    $fail += "the box stopped growing at bottom $($r3.bottom) instead of reaching the region's bottom at 1400"
+# The limit is 1395, not 1400: the region's own frame owns the pixel just inside
+# the selection and the label's red frame is stroked 3px outside the box, so
+# CTextEditor::Limit works to a rect inset by both. The box grows a whole line cell
+# at a time, so how far short of the limit its bottom lands is the remainder of the
+# label's height against that cell and can be a full cell -- what must not happen is
+# the box crossing the limit or stopping a cell short of it.
+$floorBottom = 1395 - $lh + 1
+"at the bottom: box bottom $($r3.bottom) (limit 1395, floor $floorBottom), $inkA red px; after 280 more: bottom $($r4.bottom), $inkB red px"
+if ($r3.bottom -lt $floorBottom) {
+    $fail += "the box stopped growing at bottom $($r3.bottom) instead of reaching the region's bottom limit at 1395, one line cell ($lh px) of slack"
 }
-if ($r4.bottom -gt 1402) { $fail += "the box ran past the region's bottom: bottom=$($r4.bottom), limit 1400" }
+if ($r4.bottom -gt 1397) { $fail += "the box ran past the region's bottom: bottom=$($r4.bottom), limit 1395" }
 if (-not $stable) {
     $fail += "after 2400 more characters the box was still taking text at the region's bottom, so nothing refuses what no longer fits"
 }

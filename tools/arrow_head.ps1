@@ -70,7 +70,12 @@ function Rect-Of([IntPtr]$h) {
     [void][AH]::GetWindowRect($h, [ref]$r)
     return $r
 }
-function IsRed($c) { return ($c.R -gt 190 -and $c.G -lt 120 -and $c.B -lt 130) }
+# The palette red is F73840, where G and B are the same low value; a sunset cloud
+# is high R, mid G, low B. Measured on a band that sits over both: real ink reads
+# G-B from -8 (solid) to +6 (an anti-aliased pixel over sky), cloud reads +25 to
+# +35. Without the G-B term the cloud sets the ink box's bottom and right edge, and
+# every profile below is then measured back from a cloud pixel instead of the tip.
+function IsRed($c) { return ($c.R -gt 190 -and $c.G -lt 120 -and ($c.G - $c.B) -lt 16) }
 function Ink-Box($bmp, [int]$x0, [int]$y0, [int]$x1, [int]$y1) {
     $l = -1; $t = -1; $r = -1; $b = -1; $n = 0
     for ($y = $y0; $y -le $y1; $y++) {

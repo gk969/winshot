@@ -20,7 +20,12 @@ extern const wchar_t kTextFace[];
 // jump when the edit commits. Both are unscaled design px; a shape scales them
 // by its own dpiScale.
 inline constexpr int kTextPadX = 4;
-inline constexpr int kTextPadY = 20;
+// Measured, not chosen: at 20 the gap under the last line was 22px against 5px
+// above the first, because Draw() anchors line 0 at the box's top edge and the
+// whole pad therefore lands at the bottom. 3 puts 5px on both sides at the
+// default font, and it is the input control's only vertical slack, so it cannot
+// go to zero.
+inline constexpr int kTextPadY = 3;
 inline constexpr int kTextMinW = 40;
 // The red frame the overlay strokes 2px outside the box, plus the pixel the line
 // lands on. Part of the label to the pointer: it is the only band of the box the
@@ -293,6 +298,14 @@ public:
     // The ink is clipped to the box, so the box is both the handle geometry and
     // what has to stay inside the 选区.
     Gdiplus::RectF BBox() const override { return m_box; }
+    // The red frame this label is shown in is stroked kEditFramePad outside the
+    // box, and that frame is part of what must not be covered by the 选区's own
+    // frame, so the box the overlay clamps on is the box plus the frame.
+    Gdiplus::RectF InkBBox() const override {
+        return Gdiplus::RectF(m_box.X - kEditFramePad, m_box.Y - kEditFramePad,
+                              m_box.Width + 2.0f * kEditFramePad,
+                              m_box.Height + 2.0f * kEditFramePad);
+    }
     // The box is drawn for this kind by the overlay — the same red frame whether
     // the label is merely selected or being edited — rather than as a selection
     // guide, so the input surface can sit inside it without covering it.
@@ -356,8 +369,18 @@ private:
 Gdiplus::REAL MeasureTextWidth(const CString& text, Gdiplus::REAL fontPx);
 
 // The line pitch the 文字 face uses at `fontPx`, in px. The editor needs it to
-// know how tall to grow and the label needs it to place each line.
+// know how tall to grow and the label needs it to place each line. This is the
+// larger of what the two engines need, so one cell serves both: the input
+// control lays lines out on GDI metrics, the committed label on GDI+'s.
 Gdiplus::REAL MeasureTextLineHeight(Gdiplus::REAL fontPx);
+
+// The height a 文字 box needs for `lines` lines: that many whole cells plus
+// `padY`. Draw puts line 0's layout rect at the box's top edge, so the gap above
+// the first line is a cell's own padding and an integral number of cells leaves
+// the same gap under the last one. `padY` is the box's only vertical slack —
+// the input control cannot grow past it — and the room a descender takes below
+// its cell, so it is never zero. Both arguments are already scaled.
+Gdiplus::REAL TextHeight(Gdiplus::REAL fontPx, Gdiplus::REAL padY, int lines);
 
 // `text` broken to fit `maxW`: Latin at the last space that fits, CJK between
 // any two characters. Shared by the editor and the committed label so the two

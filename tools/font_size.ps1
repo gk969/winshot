@@ -379,10 +379,11 @@ if (-not $ed3) {
 # deselecting its label. The size therefore has to be aimed at the label found
 # before focus moved.
 #
-# The measurement is the box's own height off the red selection frame, not the ink
-# rows. A label that was typed rather than dragged gets a height of exactly the
-# font size plus the 20px the box keeps for the caret, so the frame pins a size to
-# the pixel where a row count only brackets it.
+# Two measurements: the box's own height off the red selection frame, which is
+# stroked at a fixed offset from the box and so pins the height to the pixel, and the
+# rows that carry ink inside it, which is what the glyphs themselves say. A label
+# that was typed rather than dragged is exactly one line cell per line tall plus the
+# few px of padding the box keeps for the caret.
 MoveTo 2300 1800; Start-Sleep -Milliseconds 400
 $g = Grab ''
 $cur = Frame-Box $g $cx $cy
@@ -392,17 +393,42 @@ $cx = [int](($cur.l + $cur.r) / 2); $cy = [int](($cur.t + $cur.b) / 2)
 Click $cx $cy
 if (Editor) { Bail 're-selecting the label opened an editor instead' }
 
+# The box height used to be fontPx + pad + (lines-1) * pitch, so it moved by at
+# least a pixel for every step of the size and a strict between-the-neighbours test
+# proved a typed size was neither snapped nor ignored. The height is now lines *
+# pitch + pad and pitch is one integer per size, so neighbouring sizes share a cell:
+# measured on 2026-10-20, 26 and 27 give the same 77px box and the same 40 ink rows,
+# while 28 gives 79 and 42. The screen therefore cannot tell a stored 27 from a 27
+# snapped down to 26, and asserting that it can would fail on correct code. What is
+# provable here is that the typed size stays inside the bracket its neighbours give
+# and that it is not the previous state left in place.
 if (-not (Pick-Row 9))  { $fail += 'the list did not open for row 9 (26)' }
 $m26 = Frame-Height $cx $cy
 if (-not (Pick-Row 10)) { $fail += 'the list did not open for row 10 (28)' }
 $m28 = Frame-Height $cx $cy
 Type-Size '27'
 $m27 = Frame-Height $cx $cy
-"list 26 -> box height $($m26.h), list 28 -> $($m28.h), typed 27 -> $($m27.h)"
+"list 26 -> box $($m26.h) px / $($m26.n) ink rows, list 28 -> $($m28.h) px / $($m28.n) rows, typed 27 -> $($m27.h) px / $($m27.n) rows"
 if (-not $m26 -or -not $m28 -or -not $m27) {
     $fail += 'the label vanished partway through the typed-size steps'
-} elseif ($m27.h -le $m26.h -or $m27.h -ge $m28.h) {
-    $fail += "typing 27 gave a box $($m27.h) px tall, outside the $($m26.h)..$($m28.h) px the list rows 26 and 28 give: the typed size was snapped to the list or ignored"
+} elseif ($m27.h -lt $m26.h -or $m27.h -gt $m28.h) {
+    $fail += "typing 27 gave a box $($m27.h) px tall, outside the $($m26.h)..$($m28.h) px the list rows 26 and 28 give: the typed size left its neighbours"
+} elseif ($m27.h -eq $m28.h -and $m27.n -eq $m28.n) {
+    $fail += "typing 27 left the label exactly as the 28 row had it ($($m27.h) px, $($m27.n) rows): the typed size was ignored"
+}
+# The snap the 27 case cannot see is visible two sizes up: 30 sits between the 28 and
+# 32 rows, whose cells are 79 and 89 px, and no single cell can span that gap, so a
+# 30 that was applied has to land strictly between them while a 30 snapped to either
+# neighbour lands on it exactly.
+if (-not (Pick-Row 12)) { $fail += 'the list did not open for row 12 (32)' }
+$mTop = Frame-Height $cx $cy
+Type-Size '30'
+$m30 = Frame-Height $cx $cy
+"list 32 -> $($mTop.h) px / $($mTop.n) rows, typed 30 -> $($m30.h) px / $($m30.n) rows"
+if (-not $mTop -or -not $m30) {
+    $fail += 'the label vanished on the way to the typed-30 step'
+} elseif ($m30.h -le $m28.h -or $m30.h -ge $mTop.h) {
+    $fail += "typing 30 gave a box $($m30.h) px tall, outside the $($m28.h)..$($mTop.h) px of the 28 and 32 rows: the typed size was snapped to the list"
 }
 
 # Clamping: the box takes any digits, and a number past the ends has to land on

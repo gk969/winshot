@@ -220,5 +220,18 @@ $ox = $sel[0]; $oy = $sel[1]
 "in png: shaft=$([int](RedCount $png (995-$ox) (740-$oy) (1015-$ox) (760-$oy))) pen=$([int](RedCount $png (960-$ox) (880-$oy) (990-$ox) (900-$oy))) badge=$([int](RedCount $png (1236-$ox) (686-$oy) (1264-$ox) (714-$oy)))"
 $png.Dispose()
 
+# A save ends the capture; the program stays in the tray so the hotkey works again.
+# "Still running" is true either way, so the overlay count is the assertion here.
+$found = New-Object System.Collections.ArrayList
+$wcb = [W5+EnumProc] {
+    param($h, $l)
+    $t = New-Object System.Text.StringBuilder 256
+    [void][W5]::GetWindowText($h, $t, 256)
+    if ($t.ToString() -eq 'WinShotOverlay') { [void]$found.Add($h) }
+    return $true
+}
+[void][W5]::EnumWindows($wcb, [IntPtr]::Zero)
+"overlay windows after the save: $($found.Count)  (want 0)"
 "winshot still running: $(-not $proc.HasExited)"
 if (-not $proc.HasExited) { $proc.Kill() }
+if ($found.Count) { "FAIL: the save left the overlay up"; exit 1 }

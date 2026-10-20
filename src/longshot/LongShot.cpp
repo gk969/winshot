@@ -830,7 +830,13 @@ void Controller::OnSave() {
         if (bar) ::SetWindowPos(bar, HWND_NOTOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
         if (tip) ::SetWindowPos(tip, HWND_NOTOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
 
-        out::SaveWithDialog(*bmp, bar);
+        if (out::SaveWithDialog(*bmp, bar)) {
+            // The stitched image is on disk, which ends the capture just as 完成
+            // does. Nothing is put back on top and polling is not re-armed:
+            // Finish posts to the sink window, which tears all of this down.
+            m_session->Finish(true);
+            return;
+        }
 
         if (bar) ::SetWindowPos(bar, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
         if (tip) ::SetWindowPos(tip, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);

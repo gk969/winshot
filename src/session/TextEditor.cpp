@@ -26,6 +26,7 @@ int WrapSlack() {
 
 BEGIN_MESSAGE_MAP(CTextEditBox, CEdit)
     ON_WM_CHAR()
+    ON_WM_LBUTTONDOWN()
     ON_WM_LBUTTONUP()
 END_MESSAGE_MAP()
 
@@ -52,6 +53,18 @@ void CTextEditBox::OnChar(UINT nChar, UINT nRepCnt, UINT nFlags) {
         return;
     }
     CEdit::OnChar(nChar, nRepCnt, nFlags);
+}
+
+// A click the user aims inside the box arrives as a down and an up. The up of the
+// gesture that opened the box arrives alone, because the overlay still held the
+// capture when that down ran. So the down is what tells the two apart, and the
+// down is where the arming gets spent: the opening up is still absorbed, which is
+// what keeps the caret at the end of the text when a label is re-opened by double
+// click, while the first click into an edit that is already open now lands where
+// it was aimed instead of bouncing back to the end.
+void CTextEditBox::OnLButtonDown(UINT nFlags, CPoint pt) {
+    m_placeAtEnd = false;
+    CEdit::OnLButtonDown(nFlags, pt);
 }
 
 void CTextEditBox::OnLButtonUp(UINT nFlags, CPoint pt) {
@@ -116,18 +129,23 @@ BOOL CTextEditor::Create(CWnd* parent, CaptureSession* session,
     // Screen-wise this is the same rectangle as before: the host moved in by padX
     // on every side, so the control moves back out by padX at the top and spans
     // the host's whole width. Its own height is the box's, which is what the
-    // control needs to lay out and scroll its lines by.
+    // control needs to lay out and scroll its lines by — and the fourth argument
+    // here is a bottom, not the height SyncToBox later passes for the same rect,
+    // so it is the host's height plus one padX, not plus two. Getting that wrong
+    // leaves the control four px taller until the first resize, which is invisible
+    // while the box has slack and cuts the last line once it does not.
     if (!m_edit.CreateEx(0, L"EDIT", text,
                          WS_CHILD | WS_VISIBLE | ES_MULTILINE | ES_AUTOVSCROLL |
                              ES_WANTRETURN,
                          CRect(0, -padX, std::max(host.Width(), 1),
-                               host.Height() + 2 * padX),
+                               host.Height() + padX),
                          this, kEditId))
         return FALSE;
 
     m_edit.SetFont(&m_font, TRUE);
-    // Caret at the end, and armed again against the second press of the double
-    // click that opened this edit, which the control is about to answer.
+    // Caret at the end, and armed against the up of whatever opened this edit:
+    // re-editing by double click releases the capture before the control exists,
+    // so that up is the control's to answer and would drop the caret on the click.
     m_edit.SetSel(text.GetLength(), text.GetLength());
     m_edit.PlaceCaretAtEnd();
     m_edit.SetFocus();
@@ -162,14 +180,20 @@ void CTextEditor::Finish(bool commit) {
 }
 
 // The 选区, in the parent's client space — the same space this window lives in.
-// The frame is what the text must stay inside, not the screen.
+// The frame is what the text must stay inside, not the screen, and it is inset
+// here by the room both frames need: the 选区's own frame owns the first pixel
+// inside the selection, this label's red frame hangs two pixels outside the box,
+// and the two lines have to keep a pixel clear of each other.
 CRect CTextEditor::Limit() const {
     CRect pcl;
     if (CWnd* parent = GetParent()) parent->GetClientRect(&pcl);
     if (!m_session) return pcl;
     CRect sel(m_session->Sel().Rect());
     sel.IntersectRect(&sel, &pcl);
-    return sel.IsRectEmpty() ? pcl : sel;
+    if (sel.IsRectEmpty()) return pcl;
+    const int pad = (int)(annot::kFrameClearance + annot::kEditFramePad);
+    sel.DeflateRect(pad, pad);
+    return sel;
 }
 
 Gdiplus::REAL CTextEditor::NeededHeight(const CString& text,
@@ -180,8 +204,7 @@ Gdiplus::REAL CTextEditor::NeededHeight(const CString& text,
                                              (Gdiplus::REAL)WrapSlack(),
                                          1.0f))
             .size();
-    return m_label->FontPx() + m_label->PadY() +
-           (lines - 1) * m_label->LineHeight();
+    return annot::TextHeight(m_label->FontPx(), m_label->PadY(), lines);
 }
 
 Gdiplus::RectF CTextEditor::BoxFor(const CString& text) const {
@@ -390,6 +413,15 @@ void CTextEditor::OnEnChange() {
         m_label->AdoptBox(BoxFor(Text()));
     }
     SyncToBox();
+    // BoxFor only ever grows, so a backspace, and an Enter that does not add a
+    // line, both change the text without moving this window — and moving the
+    // window is the only thing that has ever erased the control's client. Left to
+    // itself the control repaints just the lines it thinks changed, over glyphs
+    // that are still showing through its transparent background, so the deleted
+    // character stays on screen and a line broken in the middle overlaps itself.
+    // SetInk invalidates for the same reason when the ink changes. After
+    // SyncToBox, so the erase runs with the backdrop brush this change installed.
+    m_edit.Invalidate();
 }
 
 void CTextEditor::OnEnKillFocus() {

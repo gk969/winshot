@@ -279,6 +279,34 @@ $redA2 = RedCount $s6 ($bandAX - 6) ($bandY0 + 5) ($bandAX + 6) ($bandY1 - 5)
 "band A after the slider moved: $redA2 (was $redA)"
 if ([Math]::Abs($redA2 - $redA) -gt 40) { $fail += 'slider retro-changed a committed band' }
 
+# --- Ctrl+Z drops band B ------------------------------------------------
+# This has to come before the save: a save now ends the capture, so there is no
+# canvas left to undo on afterwards. There is no redo either, so band B is drawn a
+# second time below -- the undo took it away and nothing else can bring it back --
+# and the PNG assertions further down are against the same two bands they always
+# were. The mosaic tool stays armed after a drag and the 模糊度 slider keeps its
+# position, so the redraw is the same drag with the same settings.
+$redUndo = 0
+for ($try = 0; $try -lt 3; $try++) {
+    [void][System.Windows.Forms.SendKeys]::SendWait('^z')
+    Start-Sleep -Milliseconds 600
+    $s7 = Grab ("D:\Project\winshot\obj\s5c_full7{0}.png" -f $try)
+    $redUndo = RedCount $s7 ($bandBX - 6) ($bandY0 + 5) ($bandBX + 6) ($bandY1 - 5)
+    if ([Math]::Abs($redUndo - $penBandB) -le 40) { break }
+}
+"band B after Ctrl+Z: $redUndo (want ~$penBandB)"
+if ([Math]::Abs($redUndo - $penBandB) -gt 40) { $fail += 'Ctrl+Z did not remove the band' }
+[void](Crop $s7 ($bandBX - 40) ($bandY0 - 10) 90 90 'D:\Project\winshot\obj\s5c_undo.png')
+
+for ($try = 0; $try -lt 3; $try++) {
+    Drag $bandBX $bandY0 $bandBX $bandY1
+    $s8 = Grab ("D:\Project\winshot\obj\s5c_full8{0}.png" -f $try)
+    $redRe = RedCount $s8 ($bandBX - 6) ($bandY0 + 5) ($bandBX + 6) ($bandY1 - 5)
+    if ($redRe -lt $penBandB - 100) { break }
+}
+"band B redrawn: red=$redRe baseline=$penBandB (want < $([int]($redA / 3)))"
+if ($redRe -gt ($redA / 3)) { $fail += 'redrawn band B did not average the lines away' }
+
 # --- save: the PNG has to carry the same two bands ----------------------
 # Saved while both bands are live, so the file can be compared against the
 # pre-undo screen: band A keeps its lines, band B has them averaged away.
@@ -357,18 +385,23 @@ if ($pA -lt 150) { $fail += 'saved png lost the small-block band' }
 if ($pB -gt ($pA / 3)) { $fail += 'saved png band B not averaged' }
 if ([Math]::Abs($pOut - $penOut) -gt 40) { $fail += 'saved png ink outside the bands changed' }
 
-# --- Ctrl+Z drops band B ------------------------------------------------
-$redUndo = 0
-for ($try = 0; $try -lt 3; $try++) {
-    [void][System.Windows.Forms.SendKeys]::SendWait('^z')
-    Start-Sleep -Milliseconds 600
-    $s7 = Grab ("D:\Project\winshot\obj\s5c_full7{0}.png" -f $try)
-    $redUndo = RedCount $s7 ($bandBX - 6) ($bandY0 + 5) ($bandBX + 6) ($bandY1 - 5)
-    if ([Math]::Abs($redUndo - $penBandB) -le 40) { break }
+# Our own windows by title: "the process is still up" is true whether the capture
+# ended or not, and only the first is the behaviour under test.
+function Wins([string]$title) {
+    $found = New-Object System.Collections.ArrayList
+    $cb = [W5C+EnumProc] {
+        param($h, $l)
+        $t = New-Object System.Text.StringBuilder 256
+        [void][W5C]::GetWindowText($h, $t, 256)
+        if ($t.ToString() -eq $title) { [void]$found.Add($h) }
+        return $true
+    }
+    [void][W5C]::EnumWindows($cb, [IntPtr]::Zero)
+    return $found.ToArray()
 }
-"band B after Ctrl+Z: $redUndo (want ~$penBandB)"
-if ([Math]::Abs($redUndo - $penBandB) -gt 40) { $fail += 'Ctrl+Z did not remove the band' }
-[void](Crop $s7 ($bandBX - 40) ($bandY0 - 10) 90 90 'D:\Project\winshot\obj\s5c_undo.png')
+$left = @(Wins 'WinShotOverlay').Count
+"overlay windows after the save: $left  (want 0)"
+if ($left -ne 0) { $fail += 'the save left the overlay up' }
 
 if ($fail.Count) { "FAIL: " + ($fail -join '; '); exit 1 }
 "PASS"

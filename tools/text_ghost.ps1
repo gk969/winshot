@@ -190,11 +190,12 @@ Click $p[0] $p[1]              # disarm, so a double click lands on the label
 # --- A: the label as committed ------------------------------------------------
 # The inset keeps the selection chrome out of the count: the frame is stroked 2px
 # outside the box and the markers straddle the edge, reaching about 2px inside it.
-# The ink itself starts 6px below the top edge, so an inset any wider than that
-# starts cutting the glyphs off and the count stops meaning anything.
+# The ink starts 5px below the top edge and, now that the box is exactly N line
+# cells, ends the same 5px above the bottom one -- with a descender a little lower,
+# so the bottom inset is 2 rather than 5 and the count keeps the whole last line.
 MoveTo 2300 1800; Start-Sleep -Milliseconds 400
 $gA = Grab 'D:\Project\winshot\obj\tg_committed.png'
-$il = $box0.left + 4; $it = $box0.top + 4; $ir = $box0.right - 5; $ib = $box0.bottom - 5
+$il = $box0.left + 4; $it = $box0.top + 4; $ir = $box0.right - 5; $ib = $box0.bottom - 2
 $inkA = Ink-Box $gA $il $it $ir $ib
 $gA.Dispose()
 if (-not $inkA) { 'FAIL: the committed label drew no ink in its own box'; exit 1 }

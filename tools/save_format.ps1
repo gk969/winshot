@@ -211,6 +211,17 @@ function Hex-Head([string]$path) {
 # dialog that never had the right controls in it.
 function Do-Save([string]$fullPath, [int]$typeIndex) {
     $r = @{ row = -1; field = ''; labels = @(); ok = $false }
+    # A save ends the capture, so every round needs a capture of its own. Summoned
+    # here rather than at the call sites so the three rounds stay one line each.
+    # The region has to be dragged first: Ctrl+S with no region has nothing to write.
+    [void][SF]::PostMessage($sink[0], 0x8002, [IntPtr]::Zero, [IntPtr]::Zero)
+    Start-Sleep -Seconds 2
+    if (-not @(Find-Wins 'WinShotOverlay').Count) {
+        $script:fail += 'the hotkey opened no overlay'
+        return , $r
+    }
+    MoveTo 400 400; Down; Walk 400 400 1400 1000 16; Up
+    Start-Sleep -Milliseconds 400
     [void][System.Windows.Forms.SendKeys]::SendWait('^s')
     $dlg = Find-Dialog $proc.Id
     if (-not $dlg) { $script:fail += 'Ctrl+S opened no save dialog'; return , $r }
@@ -297,6 +308,10 @@ function Do-Save([string]$fullPath, [int]$typeIndex) {
     [void][System.Windows.Forms.SendKeys]::SendWait('{ENTER}')
     Start-Sleep -Seconds 2
     $r.ok = $true
+    # The save is what ends the capture, and the next round's summon relies on that.
+    if (@(Find-Wins 'WinShotOverlay').Count) {
+        $script:fail += "saving $(Split-Path -Leaf $fullPath) left the overlay up"
+    }
     return , $r
 }
 
@@ -315,14 +330,8 @@ Start-Sleep -Seconds 2
 
 $sink = @(Find-Wins 'WinShotSink')
 if ($sink.Count -eq 0) { 'FAIL: no sink window'; exit 1 }
-[void][SF]::PostMessage($sink[0], 0x8002, [IntPtr]::Zero, [IntPtr]::Zero)
-Start-Sleep -Seconds 2
-if (-not @(Find-Wins 'WinShotOverlay').Count) { 'FAIL: no overlay window'; exit 1 }
-
-# A region has to exist before Ctrl+S has anything to write.
-MoveTo 400 400; Down; Walk 400 400 1400 1000 16; Up
-Start-Sleep -Milliseconds 400
-
+# Each round summons and drags its own region inside Do-Save: the save at the end of
+# a round ends the capture, so there is nothing to carry into the next one.
 # --- 1: no extension typed, dropdown left where the dialog put it -------------
 $r = Do-Save "$obj\sf_a" -1
 "dropdown rows: $($r.labels -join ' | ')"
@@ -346,8 +355,6 @@ $r = Do-Save "$obj\sf_c.png" 1
 if (-not (Is-Png "$obj\sf_c.png")) { $fail += 'a typed .png against the JPEG filter did not write a PNG' }
 if (Test-Path "$obj\sf_c.jpg") { $fail += 'a typed .png against the JPEG filter wrote a .jpg anyway' }
 
-[void][System.Windows.Forms.SendKeys]::SendWait('{ESC}')
-Start-Sleep -Milliseconds 400
 if (-not $proc.HasExited) { $proc.Kill() }
 if ($fail.Count) { "FAILURES: $($fail.Count)"; $fail | ForEach-Object { "  $_" }; exit 1 }
 'PASS'

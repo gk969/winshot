@@ -135,7 +135,7 @@ if (-not $clip) {
 if ($clip.Width -ne $SW -or $clip.Height -ne $SH) {
     $fail += "the clipboard holds $($clip.Width)x$($clip.Height), want the whole screen $SW x $SH"
 }
-$diff = 0; $seen = 0
+$diff = 0; $seen = 0; $where = ''
 foreach ($fy in @(0.1, 0.3, 0.5, 0.7, 0.9)) {
     foreach ($fx in @(0.1, 0.3, 0.5, 0.7, 0.9)) {
         $x = [int]($SW * $fx); $y = [int]($SH * $fy)
@@ -143,11 +143,19 @@ foreach ($fy in @(0.1, 0.3, 0.5, 0.7, 0.9)) {
         $c1 = $clip.GetPixel($x, $y); $c2 = $before.GetPixel($x, $y)
         $seen++
         if (([Math]::Abs($c1.R - $c2.R) + [Math]::Abs($c1.G - $c2.G) +
-             [Math]::Abs($c1.B - $c2.B)) -gt 24) { $diff++ }
+             [Math]::Abs($c1.B - $c2.B)) -gt 24) {
+            $diff++
+            $where += " $x,$y"
+        }
     }
 }
-"clipboard vs the screen before the summon: $diff of $seen samples differ"
-if ($seen -gt 0 -and $diff -gt 0) {
+"clipboard vs the screen before the summon: $diff of $seen samples differ$where"
+# One sample is allowed to disagree. The nine points are fixed on a live desktop,
+# and a caret sitting on one of them moves: measured on 2026-10-21 with winshot not
+# even running, 2688,1944 read 21,21,21 and then 61,61,59 three seconds later. What
+# this is looking for is the copy carrying the dimmed overlay or the selection
+# frame, and that differs at every point, not one.
+if ($seen -gt 0 -and $diff -gt 1) {
     $fail += "$diff of $seen clipboard pixels are not what was on the screen, so it did not copy the screen"
 }
 $clip.Dispose(); $before.Dispose()

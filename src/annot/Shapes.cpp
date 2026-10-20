@@ -94,6 +94,26 @@ public:
         return (Gdiplus::REAL)sz.cx;
     }
 
+    // The line pitch GDI lays out with for this face. The inline editor's glyphs
+    // are drawn by a classic EDIT control on these metrics while the committed
+    // label uses GDI+'s, and GDI rounds its ascent and descent separately, so the
+    // two need not agree. Static because the editor asks before any label exists.
+    static int LineHeight(Gdiplus::REAL fontPx) {
+        static std::map<int, int> heights;
+        const int px = std::max(1, (int)std::lround((double)fontPx));
+        const auto it = heights.find(px);
+        if (it != heights.end()) return it->second;
+
+        HDC dc = MemDc();
+        HGDIOBJ prev = SelectObject(dc, FontFor(fontPx));
+        TEXTMETRICW tm{};
+        GetTextMetricsW(dc, &tm);
+        SelectObject(dc, prev);
+        const int height = tm.tmHeight + tm.tmExternalLeading;
+        heights.emplace(px, height);
+        return height;
+    }
+
 private:
     static HDC MemDc() {
         // One DC for the process: it is only ever a carrier for the font, and the
@@ -164,8 +184,19 @@ Gdiplus::REAL MeasureTextLineHeight(Gdiplus::REAL fontPx) {
     const int pitch = family.GetLineSpacing(Gdiplus::FontStyleRegular);
     // A face with no metrics at all still needs a pitch, and rounding up keeps
     // the lines from overlapping into one smudge.
-    if (em <= 0 || pitch <= 0) return std::ceil(fontPx * 1.3f);
-    return std::ceil(fontPx * (Gdiplus::REAL)pitch / (Gdiplus::REAL)em);
+    const Gdiplus::REAL gdiPlus = (em <= 0 || pitch <= 0)
+                                      ? std::ceil(fontPx * 1.3f)
+                                      : std::ceil(fontPx * (Gdiplus::REAL)pitch /
+                                                  (Gdiplus::REAL)em);
+    // The box is one cell per line, so the cell has to be big enough for
+    // whichever engine lays lines out. The EDIT control answers a line that no
+    // longer fits by cutting it off rather than by growing, and it only ever
+    // does that while editing, where nothing is comparing it to the commit.
+    return std::max(gdiPlus, (Gdiplus::REAL)TextMeasurer::LineHeight(fontPx));
+}
+
+Gdiplus::REAL TextHeight(Gdiplus::REAL fontPx, Gdiplus::REAL padY, int lines) {
+    return (Gdiplus::REAL)lines * MeasureTextLineHeight(fontPx) + padY;
 }
 
 std::vector<CString> WrapLines(const CString& text, Gdiplus::REAL fontPx,
@@ -622,9 +653,7 @@ void ShapeText::SetFontSize(int designPx) {
     m_fontPx = (Gdiplus::REAL)designPx * m_dpiScale;
     // After the size changes: the lines are wrapped at this font, at this width.
     InvalidateLayout();
-    const Gdiplus::REAL need =
-        m_fontPx + PadY() +
-        (Gdiplus::REAL)((int)Lines().size() - 1) * LineHeight();
+    const Gdiplus::REAL need = TextHeight(m_fontPx, PadY(), (int)Lines().size());
     m_box.Height = m_userSized ? std::max(m_box.Height, need) : need;
 }
 
@@ -633,7 +662,7 @@ void ShapeText::MoveHandle(int i, Gdiplus::PointF pt) {
     // The box is the user's from here on: it never grows wider to fit the text, so
     // a narrower box re-wraps into more lines. The floors keep one line visible.
     m_box.Width = std::max(m_box.Width, (Gdiplus::REAL)kTextMinW);
-    m_box.Height = std::max(m_box.Height, m_fontPx + PadY());
+    m_box.Height = std::max(m_box.Height, TextHeight(m_fontPx, PadY(), 1));
     m_userSized = true;
     InvalidateLayout();
 
@@ -642,9 +671,7 @@ void ShapeText::MoveHandle(int i, Gdiplus::PointF pt) {
     // height would drop the new lines off the bottom and the gesture that was only
     // meant to re-wrap the text would silently delete the end of it. Growing only,
     // never shrinking, so dragging the bottom edge up still trims.
-    const Gdiplus::REAL need =
-        m_fontPx + PadY() +
-        (Gdiplus::REAL)((int)Lines().size() - 1) * LineHeight();
+    const Gdiplus::REAL need = TextHeight(m_fontPx, PadY(), (int)Lines().size());
     m_box.Height = std::max(m_box.Height, need);
 }
 

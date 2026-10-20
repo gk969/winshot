@@ -155,6 +155,12 @@ private:
     // decides whether it is computed and whether it is drawn, so the two can
     // never disagree and leave a frame on screen that nothing maintains.
     bool HoverActive() const;
+    // Whether the hovered window's frame is what the blue belongs to right now,
+    // which is when the 选区's own frame — the one at the edge of the screen while
+    // the region is still the whole screen, and the grips on it — is not drawn.
+    // Two blue frames on the screen at once read as two regions, and the invisible
+    // grips would still answer a press.
+    bool SelFrameHidden() const;
     void DrawSizeLabel(Gdiplus::Graphics& g);
     void DrawEditFrame(Gdiplus::Graphics& g);
     void DrawFontDropdown(Gdiplus::Graphics& g);

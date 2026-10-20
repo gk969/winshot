@@ -4,6 +4,28 @@ namespace annot {
 
 enum class Kind { Rect, Ellipse, Arrow, Pen, Mosaic, Text, Badge };
 
+// The 选区 draws its own frame as a 2px pen centred on the selection edge, which
+// means the frame owns the first pixel *inside* the selection. An annotation that
+// stops at the edge shares that pixel and gets painted over, so the box that has
+// to stay inside the 选区 clears the frame and leaves one more pixel empty.
+constexpr Gdiplus::REAL kFrameClearance = 2.0f;
+
+// The red frame a 文字 label is shown in is stroked outside the label's own box
+// (COverlayWnd::DrawEditFrame inflates it by 2 and strokes a 1px pen on the
+// half pixel), so for a label the box that needs the clearance is not the text
+// box but the text box plus this. Measured on screen: the frame's outermost
+// pixel is 3 columns left of the box and 2 rows above it, because the pen lands
+// one pixel outside the rect it is given. The left side is the tight one.
+constexpr Gdiplus::REAL kEditFramePad = 3.0f;
+
+// How far ink reaches past the geometry that produced it: half the pen for a
+// stroke, and the 1.5px an anti-aliased edge feathers when the pen is thinner
+// than that. Shapes.h's InkBBox overrides and the drawing bounds both use it.
+inline Gdiplus::REAL InkPadForPen(Gdiplus::REAL pen) {
+    const Gdiplus::REAL half = pen / 2.0f;
+    return half > 1.5f ? half : 1.5f;
+}
+
 // Geometry is stored in overlay-client pixels — the same space as the frozen
 // still and the selection — so moving the selection carries the drawing with it
 // and compositing is only a clip plus a translate.

@@ -8,15 +8,17 @@ class CaptureSession;
 // the dialog manager from eating the key.
 class CTextEditBox : public CEdit {
 public:
-    // The second click of the double-click that opened the edit lands on a
-    // control that has only just been created, and the control then puts the
-    // caret where it was clicked rather than at the end of the text. One-shot, so
-    // the next click is the user aiming somewhere on purpose.
+    // The up of the gesture that opened the edit lands on a control that has only
+    // just been created, and the control then puts the caret where it was clicked
+    // rather than at the end of the text. Only that up is absorbed: a click the
+    // user aims somewhere arrives as a down and an up, while the opening up
+    // arrives alone because the overlay still held the capture when its down ran.
     void PlaceCaretAtEnd() { m_placeAtEnd = true; }
 
 protected:
     DECLARE_MESSAGE_MAP()
     afx_msg void OnChar(UINT nChar, UINT nRepCnt, UINT nFlags);
+    afx_msg void OnLButtonDown(UINT nFlags, CPoint pt);
     afx_msg void OnLButtonUp(UINT nFlags, CPoint pt);
 
 private:

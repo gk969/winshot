@@ -33,10 +33,28 @@ bool InRegion(const RECT& s, CPoint pt) {
     return pt.x >= s.left && pt.x <= s.right && pt.y >= s.top && pt.y <= s.bottom;
 }
 
-// A box that lies wholly inside the region, edges touching allowed.
+// A box that lies wholly inside the region, clear of the frame the region draws
+// over its own edge. Touching is not allowed: that frame is a 2px pen centred on
+// the selection edge, so it owns the first pixel inside the selection, and an
+// outline parked there is painted over instead of read as its own line.
 bool InRegion(const RECT& s, const Gdiplus::RectF& b) {
-    return b.X >= s.left && b.Y >= s.top && b.X + b.Width <= s.right &&
-           b.Y + b.Height <= s.bottom;
+    return b.X >= s.left + annot::kFrameClearance &&
+           b.Y >= s.top + annot::kFrameClearance &&
+           b.X + b.Width <= s.right - annot::kFrameClearance &&
+           b.Y + b.Height <= s.bottom - annot::kFrameClearance;
+}
+
+// Where a drawing tool may put the geometry it drags out, for the pen it draws
+// with: InRegion's clearance, reached by backing the pointer off by the ink the
+// shape will add on top. The press point needs this as much as the drag does — a
+// box and an arrow both recompute from the press point, so an anchor parked on the
+// frame keeps that edge no matter where the pointer goes afterwards.
+RECT DrawBounds(const RECT& s, Gdiplus::REAL pen) {
+    const int pad = (int)std::ceil(annot::InkPadForPen(pen) +
+                                   annot::kFrameClearance);
+    RECT r = s;
+    ::InflateRect(&r, -pad, -pad);
+    return r;
 }
 
 // The crosshair a drawing tool shows inside the region: a plain cross with a
@@ -1144,7 +1162,9 @@ void COverlayWnd::TipChanged(const CPoint* anchor) {
 // outside it, in the selected state and in the editing state alike — the frame is
 // what says the text is a box, and the eight square markers on it are what says
 // whether it can be resized. Called from inside the selection chrome's clip,
-// which clears this same rect: a ClipTo of its own would drop the markers.
+// which clears this same rect: a ClipTo of its own would drop the markers. The
+// 选区's frame erases the part of it that comes inside the selection, so it is
+// called a second time from there — see the note at the end of that function.
 void COverlayWnd::DrawEditFrame(Gdiplus::Graphics& g) {
     annot::ShapeText* t = FrameText();
     if (!t) return;
@@ -1232,6 +1252,10 @@ bool COverlayWnd::HoverActive() const {
     return m_session->Sel().IsDefault();
 }
 
+bool COverlayWnd::SelFrameHidden() const {
+    return HoverActive() && !m_hover.IsRectEmpty();
+}
+
 void COverlayWnd::UpdateHover() {
     CRect next;
     POINT cur{};
@@ -1258,6 +1282,12 @@ void COverlayWnd::UpdateHover() {
     const int hs = Dpi::S(GetSafeHwnd(), 8);
     if (!was.IsRectEmpty()) InvalidateRing(was, hs);
     if (!m_hover.IsRectEmpty()) InvalidateRing(m_hover, hs);
+    // One frame or the other, so handing the blue to a window takes it off the
+    // edge of the screen, and taking it back has to repaint that edge: neither
+    // ring above reaches it, and the 选区's frame there carries the eight grips
+    // as well as the line.
+    if (HoverActive() && was.IsRectEmpty() != m_hover.IsRectEmpty())
+        InvalidateRing(cl, hs);
 }
 
 void COverlayWnd::DrawHoverFrame(Gdiplus::Graphics& g) {
@@ -1286,6 +1316,10 @@ void COverlayWnd::DrawHoverFrame(Gdiplus::Graphics& g) {
 }
 
 void COverlayWnd::DrawSelectionFrame(Gdiplus::Graphics& g) {
+    // Before the band is registered: an empty band blended from the chrome buffer
+    // would put stale pixels back where nothing was drawn.
+    if (SelFrameHidden()) return;
+
     RECT s = m_session->Sel().Rect();
     int w = s.right - s.left;
     int h = s.bottom - s.top;
@@ -1345,6 +1379,25 @@ void COverlayWnd::DrawSelectionFrame(Gdiplus::Graphics& g) {
     for (const POINT& p : pts)
         g.FillRectangle(&fill, (Gdiplus::REAL)(p.x - off), (Gdiplus::REAL)(p.y - off),
                         (Gdiplus::REAL)hs, (Gdiplus::REAL)hs);
+
+    // The band reaches off pixels inside the 选区 and clears what it clips, so a
+    // 文字 label parked against the edge loses the side of its red frame that
+    // faces it — which is where the clamp parks every label that gets near one.
+    // Drawn again here, clipped to the band itself (the clip is the outer box, so
+    // taking the inner box out of it by xor leaves exactly the four strips): the
+    // line comes back wherever the 选区's frame reached, the strips are already
+    // registered for blending, and nothing outside them is touched, so the
+    // markers and the ring the clip above drew keep the rest of the frame.
+    if (FrameText()) {
+        const Gdiplus::GraphicsState st = g.Save();
+        g.SetClip(Gdiplus::RectF((Gdiplus::REAL)(s.left + off),
+                                 (Gdiplus::REAL)(s.top + off),
+                                 (Gdiplus::REAL)(w - 2 * off),
+                                 (Gdiplus::REAL)(h - 2 * off)),
+                  Gdiplus::CombineModeXor);
+        DrawEditFrame(g);
+        g.Restore(st);
+    }
 }
 
 void COverlayWnd::DrawSizeLabel(Gdiplus::Graphics& g) {
@@ -1650,8 +1703,11 @@ void COverlayWnd::OnLButtonDown(UINT, CPoint pt) {
     m_annoIdx = m_annoHandle = -1;
     m_pending.reset();
 
-    // The 编辑 frame cannot be sized, so its edges are not handles there.
-    SelHandle h = m_session->LongShotEdit()
+    // The 编辑 frame cannot be sized, so its edges are not handles there, and the
+    // grips on the whole-screen 选区 are not handles while a hovered window holds
+    // the blue either: a press on a grip nobody can see would only shrink the
+    // screen by a few pixels. There the press starts a new region instead.
+    SelHandle h = m_session->LongShotEdit() || SelFrameHidden()
                       ? SelHandle::None
                       : sel.HitTest(POINT{ pt.x, pt.y }, HandleRadius());
     if (h != SelHandle::None) {
@@ -1678,6 +1734,17 @@ void COverlayWnd::OnLButtonDown(UINT, CPoint pt) {
         // a stroke, and a stroke that begins on old ink must not drag it along.
         const tb::Id tool = m_session->ActiveTool();
         const bool freehand = tool == tb::Id::Pen || tool == tb::Id::Mosaic;
+        // What gets dragged out is bounded by the press point as much as by the
+        // pointer — a box recomputes from its anchor on every move — so the anchor
+        // has to be inset by the ink the tool will lay down. The 马赛克 brush draws
+        // a band four times the dot wide, so its anchor clears half the band.
+        const Gdiplus::REAL dot = (Gdiplus::REAL)m_session->Style().PenWidth();
+        const CRect drawTo(DrawBounds(
+            sel.Rect(), tool == tb::Id::Mosaic ? annot::MosaicBandForPen(dot)
+                                               : dot));
+        CPoint start = pt;
+        start.x = std::max(drawTo.left, std::min(start.x, drawTo.right));
+        start.y = std::max(drawTo.top, std::min(start.y, drawTo.bottom));
         annot::Annotation* a = freehand
                                    ? nullptr
                                    : m_session->Annos().TopAt(
@@ -1698,8 +1765,8 @@ void COverlayWnd::OnLButtonDown(UINT, CPoint pt) {
             // typing is that label's own, frame and markers included.
             m_session->BeginTextEdit(pt, nullptr);
         } else if ((m_pending = annot::MakeShape(
-                        tool, Gdiplus::PointF((Gdiplus::REAL)pt.x,
-                                              (Gdiplus::REAL)pt.y),
+                        tool, Gdiplus::PointF((Gdiplus::REAL)start.x,
+                                              (Gdiplus::REAL)start.y),
                         m_session->Style(), m_session->NextBadgeNumber(),
                         &m_session->Mosaic()))) {
             m_mode = Mode::Drawing;
@@ -1790,12 +1857,15 @@ void COverlayWnd::OnMouseMove(UINT, CPoint pt) {
         break;
     }
     case Mode::Drawing:
-        // Past the frame the shape keeps the result of the last position inside:
+        // Past the bounds the shape keeps the result of the last position inside:
         // the box and the arrow recompute from a fixed start, so not being called
         // holds them there, and the freehand tools append, so not being called
         // stops sampling at the last point that was inside. Releasing outside
-        // commits what is there, which is what ends the drag.
-        if (m_pending && InRegion(sel.Rect(), pt)) {
+        // commits what is there, which is what ends the drag. The bounds are the
+        // frame inset by the ink this shape draws with, which is the same inset
+        // the press point was clamped to.
+        if (m_pending &&
+            InRegion(DrawBounds(sel.Rect(), m_pending->PenWidth()), pt)) {
             const CRect before = AnnoRect(m_pending.get());
             m_pending->UpdateDrag(
                 Gdiplus::PointF((Gdiplus::REAL)pt.x, (Gdiplus::REAL)pt.y),
@@ -1998,8 +2068,11 @@ BOOL COverlayWnd::OnSetCursor(CWnd*, UINT, UINT) {
 
     const SelectionModel& sel = m_session->Sel();
     const POINT p{ pt.x, pt.y };
-    // The 编辑 frame has no edges to grab, so it offers no handles either.
-    SelHandle h = m_mode == Mode::Idle && !m_session->LongShotEdit()
+    // The 编辑 frame has no edges to grab, so it offers no handles either, and
+    // neither do the grips the whole-screen 选区 would draw: while a hovered
+    // window has the blue there is nothing there to point a sizing hand at.
+    SelHandle h = m_mode == Mode::Idle && !m_session->LongShotEdit() &&
+                          !SelFrameHidden()
                       ? sel.HitTest(p, HandleRadius())
                       : m_handle;
 
