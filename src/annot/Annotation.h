@@ -52,6 +52,10 @@ public:
     // and selected changes with them, so every kind that has an ink or a stroke
     // width takes it; the ones that have neither ignore it.
     virtual void SetStyle(Gdiplus::Color /*ink*/, Gdiplus::REAL /*pen*/) {}
+    // The 字号 picker, in design px: the shape scales it by its own dpiScale, so
+    // this is the one place a logical size becomes a physical one. Only the 文字
+    // label has a font; the rest ignore the picker.
+    virtual void SetFontSize(int /*designPx*/) {}
 
     // Discarded on button up when true, so a stray click does not leave a
     // degenerate shape behind.

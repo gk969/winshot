@@ -250,6 +250,42 @@ void CTextEditor::SyncToBox() {
     if (CWnd* parent = GetParent()) parent->InvalidateRect(&dirty, FALSE);
 }
 
+void CTextEditor::SetInk(Gdiplus::Color ink) {
+    m_ink = ink;
+    // OnCtlColor runs again before the control draws its next line and hands back
+    // the still as the background, so invalidating erases the old glyphs into the
+    // frozen screen and repaints them in the new colour. Nothing else has to move:
+    // the box is the size the font needs already.
+    if (m_edit.GetSafeHwnd()) m_edit.Invalidate();
+}
+
+void CTextEditor::ApplyFontSize(int designPx) {
+    if (!m_label || !m_edit.GetSafeHwnd()) return;
+
+    m_label->SetFontSize(designPx);
+    m_fontPx = (int)m_label->FontPx();
+
+    // The label re-fit its own height, but it does not know where the 选区 ends.
+    // A bigger font can ask for more room below than the frame has left, and the
+    // box cannot scroll: it stops at the bottom edge and the lines that no longer
+    // fit drop off, which is what happens to a character typed past the last line.
+    Gdiplus::RectF box = m_label->Box();
+    box.Height = std::min(box.Height, (Gdiplus::REAL)Limit().bottom - box.Y);
+    m_label->AdoptBox(box);
+
+    LOGFONT lf{};
+    lf.lfHeight = -m_fontPx;
+    lf.lfWeight = FW_NORMAL;
+    lf.lfCharSet = DEFAULT_CHARSET;
+    wcscpy_s(lf.lfFaceName, annot::kTextFace);
+    m_font.DeleteObject();
+    if (!m_font.CreateFontIndirect(&lf)) return;
+    // TRUE so the control redraws with it at once; SyncToBox then moves the window
+    // onto the box the new size needs and re-samples the pixels behind it.
+    m_edit.SetFont(&m_font, TRUE);
+    SyncToBox();
+}
+
 void CTextEditor::RebuildBackdrop() {
     // Sampled over the control's own rectangle, not this window's: the tile is
     // applied with its origin at the control's client (0,0), so sampling it

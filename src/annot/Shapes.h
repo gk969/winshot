@@ -296,6 +296,9 @@ public:
     std::unique_ptr<Annotation> Clone() const override;
     // Size comes from the font, not the stroke width.
     void SetStyle(Gdiplus::Color ink, Gdiplus::REAL) override { m_ink = ink; }
+    // The one place the 字号 picker's design px becomes the device px the box is
+    // measured in; the inline editor reads the result back through FontPx().
+    void SetFontSize(int designPx) override;
 
     const CString& Text() const { return m_text; }
     void SetText(const CString& t);

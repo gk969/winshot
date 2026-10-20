@@ -47,13 +47,28 @@ inline constexpr int kCurrentX = 85;
 // Text property bar: the 字号 box and the list it drops down (文字-字体大小.png).
 // Measured off that reference: the box is 46x23 centred in the 37px bar, 30px in
 // from its left edge; the list hangs 2px under it, same width, 20px per row.
-inline constexpr int kFontSizes[6] = { 12, 14, 16, 18, 20, 22 };
+// The list steps by two — 8 through 32 in thirteen rows — because that is as
+// many rows as will hang under the box without running off the screen. The box
+// itself takes a typed number, which is how an odd size is reached.
+inline constexpr int kFontMin = 8, kFontMax = 32, kFontStep = 2;
+inline constexpr int kFontRowCount = (kFontMax - kFontMin) / kFontStep + 1;
+constexpr int FontSizeForRow(int row) { return kFontMin + row * kFontStep; }
+// The row to highlight for a size, or -1 when the size was typed and is not on
+// the list — a 27 has no row to light up.
+constexpr int FontRowForSize(int px) {
+    return (px < kFontMin || px > kFontMax || (px - kFontMin) % kFontStep)
+               ? -1
+               : (px - kFontMin) / kFontStep;
+}
 inline constexpr int kFontBoxX = 30;      // bar edge -> box left
 inline constexpr int kFontBoxW = 46;
 inline constexpr int kFontBoxH = 23;
 inline constexpr int kFontRow = 20;       // one row of the dropdown list
 inline constexpr int kFontPad = 7;        // box edge -> the digits
 inline constexpr int kFontArrow = 9;      // box right edge -> the ▼ centre
+// The ▼'s own strip at the right end of the box. The rest of the box is the
+// number, which is typed into rather than clicked.
+inline constexpr int kFontArrowW = 16;
 
 // Mosaic property bar: 模糊度 and the slider that sets the block size
 // (马赛克-鼠标拖动变模糊.png). Measured off that reference: the label runs

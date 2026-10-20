@@ -606,6 +606,20 @@ void ShapeText::AdoptBox(const Gdiplus::RectF& box) {
     InvalidateLayout();
 }
 
+// The width is the user's and stays exactly as they left it; only the height
+// follows the font, so a bigger size cannot clip its own last line and a smaller
+// one does not throw away room a handle was dragged out. A label that was never
+// resized by hand re-fits both ways, because its height was never the user's.
+void ShapeText::SetFontSize(int designPx) {
+    m_fontPx = (Gdiplus::REAL)designPx * m_dpiScale;
+    // After the size changes: the lines are wrapped at this font, at this width.
+    InvalidateLayout();
+    const Gdiplus::REAL need =
+        m_fontPx + PadY() +
+        (Gdiplus::REAL)((int)Lines().size() - 1) * LineHeight();
+    m_box.Height = m_userSized ? std::max(m_box.Height, need) : need;
+}
+
 void ShapeText::MoveHandle(int i, Gdiplus::PointF pt) {
     BoxResize(m_box, i, pt);
     // The box is the user's from here on: it never grows wider to fit the text, so

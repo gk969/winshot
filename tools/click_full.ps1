@@ -23,6 +23,12 @@ public static class CF {
     [DllImport("user32.dll")] public static extern bool PostMessage(IntPtr h, uint msg, IntPtr w, IntPtr l);
     [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr h, out RECT r);
     [DllImport("user32.dll")] public static extern void mouse_event(uint f, uint dx, uint dy, uint d, UIntPtr e);
+    [DllImport("user32.dll")] public static extern int GetClassName(IntPtr h, StringBuilder s, int n);
+    [DllImport("user32.dll")] public static extern int GetWindowLong(IntPtr h, int idx);
+    [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr h, out uint pid);
+    [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr h, int cmd);
+    [DllImport("dwmapi.dll")] public static extern int DwmGetWindowAttribute(IntPtr h, int attr, out RECT val, int size);
+    [DllImport("dwmapi.dll", EntryPoint="DwmGetWindowAttribute")] public static extern int DwmGetInt(IntPtr h, int attr, out int val, int size);
     [StructLayout(LayoutKind.Sequential)] public struct RECT { public int left, top, right, bottom; }
 }
 "@
@@ -85,7 +91,12 @@ function Same-Rect($a, $b) {
     return ($a.left -eq $b.left -and $a.top -eq $b.top -and
             $a.right -eq $b.right -and $a.bottom -eq $b.bottom)
 }
-function IsRed($c) { return ($c.R -gt 190 -and $c.G -lt 120 -and $c.B -lt 130) }
+# tb::kPalette[0] is (247,56,64), and the margin has to clear the desktop as well
+# as the ink: once the region is picked the whole screen is undimmed (DrawDim only
+# covers a selection that is still default), so a warm wallpaper sits in the sample
+# window at full brightness. Green is the tell -- the red's is 64, the wallpaper's
+# measured 114 and up.
+function IsRed($c) { return ($c.R -gt 215 -and $c.G -lt 100 -and $c.B -lt 115) }
 # loupe::kCross is (77,202,250), and nothing else on screen is that blue.
 function IsCyan($c) {
     return ([Math]::Abs($c.R - 77) -le 40 -and [Math]::Abs($c.G - 202) -le 40 -and
@@ -122,6 +133,66 @@ function Ink-Box($bmp, [int]$x0, [int]$y0, [int]$x1, [int]$y1, $skip = @()) {
     return @{ l = $l; t = $t; r = $r; b = $b; n = $n }
 }
 
+# Hovering the live desktop now frames the program window under the cursor, and a
+# click there takes that window instead of the whole screen. This script is about
+# the other case -- a click on the desktop itself -- so the point it clicks has to
+# have no program window under it. On a desktop the user has filled with windows
+# there is no such point to find, so the ones covering it are minimized for the
+# duration of the test and restored after. The filter set mirrors the product's on
+# purpose: a cloaked window (and on this desktop two of them cover every pixel) is
+# "visible" to IsWindowVisible yet never wins a hover, so minimizing them would
+# disturb the user for nothing.
+function Get-Covering([int]$x, [int]$y) {
+    $own = [System.Diagnostics.Process]::GetCurrentProcess().Id
+    $found = New-Object System.Collections.ArrayList
+    $cb = [CF+EnumProc] {
+        param($h, $l)
+        $p = [uint32]0
+        [void][CF]::GetWindowThreadProcessId($h, [ref]$p)
+        if ([int]$p -ne $own -and [CF]::IsWindowVisible($h) -and
+            (([CF]::GetWindowLong($h, -20) -band 0x80) -eq 0)) {
+            $c = New-Object System.Text.StringBuilder 64
+            [void][CF]::GetClassName($h, $c, 64)
+            $cl = $c.ToString()
+            if ($cl -ne 'Progman' -and $cl -ne 'WorkerW' -and $cl -ne 'Shell_TrayWnd' -and
+                $cl -ne 'Shell_SecondaryTrayWnd' -and
+                $cl -ne 'ApplicationWindowLightDismiss') {
+                $ck = [int]0
+                # DWMWA_CLOAKED is 14.
+                if ([CF]::DwmGetInt($h, 14, [ref]$ck, 4) -eq 0 -and $ck -eq 0) {
+                    $r = New-Object CF+RECT
+                    # DWMWA_EXTENDED_FRAME_BOUNDS is 9, the visible rectangle the
+                    # hover frame lands on; the fallback over-collects, which can
+                    # only ever minimize one window more than was needed.
+                    if ([CF]::DwmGetWindowAttribute($h, 9, [ref]$r,
+                            [Runtime.InteropServices.Marshal]::SizeOf($r)) -ne 0) {
+                        [void][CF]::GetWindowRect($h, [ref]$r)
+                    }
+                    if ($x -ge $r.left -and $x -lt $r.right -and
+                        $y -ge $r.top -and $y -lt $r.bottom) {
+                        [void]$found.Add($h)
+                    }
+                }
+            }
+        }
+        return $true
+    }
+    [void][CF]::EnumWindows($cb, [IntPtr]::Zero)
+    return $found.ToArray()
+}
+
+$script:restored = $false
+function Restore-Windows {
+    if ($script:restored) { return }
+    $script:restored = $true
+    foreach ($h in @($minimized)) {
+        # SW_RESTORE is 9. A window that was maximized comes back maximized -- the
+        # placement is the shell's own record, not something this script has to
+        # remember -- so the desktop is left as it was found.
+        [void][CF]::ShowWindow($h, 9)
+    }
+}
+
 # The click lands mid-screen, clear of the toolbar, which sits at the bottom of
 # the full-screen region. The loupe card hangs 30px below-right of the cursor and
 # is 117x146.
@@ -133,22 +204,44 @@ $cy = $at[1] + 30
 $card = @($cx, $cy, ($cx + 116), ($cy + 145))
 $box = @(1000, 700, 1400, 900)
 $fail = @()
+$minimized = @()
+$proc = $null
+function Bail([string]$msg) {
+    # The windows this script minimized have to come back whether the test passes
+    # or not, which is why every exit goes through here.
+    Restore-Windows
+    if ($proc -and -not $proc.HasExited) { $proc.Kill() }
+    $all = @($msg) + $fail
+    "FAILURES: $($all.Count)"
+    $all | ForEach-Object { "  $_" }
+    exit 1
+}
 
 MoveTo 3000 1900
 Start-Sleep -Milliseconds 400
 Get-Process winshot -ErrorAction SilentlyContinue | Stop-Process -Force
 Start-Sleep -Milliseconds 600
+
+# Clear the click point down to the wallpaper before the still is taken, so the
+# frozen desktop and the live one underneath agree about what is there.
+$minimized = @(Get-Covering $at[0] $at[1])
+foreach ($h in $minimized) { [void][CF]::ShowWindow($h, 6) }   # SW_MINIMIZE
+Start-Sleep -Milliseconds 900
+$still = @(Get-Covering $at[0] $at[1])
+if ($still.Count) { Bail "the $($still.Count) windows covering $($at[0]),$($at[1]) did not minimize; the click would land on a program window and the desktop case cannot be tested here" }
+"minimized $($minimized.Count) windows to clear $($at[0]),$($at[1]) for the desktop click"
+
 $proc = Start-Process -FilePath 'D:\Project\winshot\x64\Debug\winshot.exe' -PassThru
 Start-Sleep -Seconds 2
 
 $sink = @(Find-Wins 'WinShotSink')
-if ($sink.Count -eq 0) { 'FAIL: no sink window'; exit 1 }
+if ($sink.Count -eq 0) { Bail 'no sink window' }
 [void][CF]::PostMessage($sink[0], 0x8002, [IntPtr]::Zero, [IntPtr]::Zero)
 Start-Sleep -Seconds 2
 $ov = @(Find-Wins 'WinShotOverlay')
-if ($ov.Count -eq 0) { 'FAIL: no overlay window'; exit 1 }
+if ($ov.Count -eq 0) { Bail 'no overlay window' }
 $t = @(Find-Kids $ov[0] 'WinShotToolbar')
-if ($t.Count -eq 0) { 'FAIL: no toolbar'; exit 1 }
+if ($t.Count -eq 0) { Bail 'no toolbar' }
 
 # --- the magnifier is up while the whole screen is still unpicked ------------
 MoveTo $at[0] $at[1]
@@ -208,6 +301,9 @@ if (-not $ink) {
 
 [void][System.Windows.Forms.SendKeys]::SendWait('{ESC}')
 Start-Sleep -Milliseconds 400
+# The overlay is down, so the desktop can go back to the user now rather than at
+# the moment the script reports its verdict.
+Restore-Windows
 if (-not $proc.HasExited) { $proc.Kill() }
 if ($fail.Count) { "FAILURES: $($fail.Count)"; $fail | ForEach-Object { "  $_" }; exit 1 }
 'PASS'

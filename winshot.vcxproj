@@ -84,6 +84,7 @@
     <ClInclude Include="src\session\TextEditor.h" />
     <ClInclude Include="src\session\Loupe.h" />
     <ClInclude Include="src\session\CaptureSession.h" />
+    <ClInclude Include="src\session\WindowPick.h" />
     <ClInclude Include="src\annot\Annotation.h" />
     <ClInclude Include="src\annot\HandleGeom.h" />
     <ClInclude Include="src\annot\Shapes.h" />
@@ -118,6 +119,7 @@
     <ClCompile Include="src\session\Loupe.cpp" />
     <ClCompile Include="src\session\CaptureSession.cpp" />
     <ClCompile Include="src\session\MosaicCache.cpp" />
+    <ClCompile Include="src\session\WindowPick.cpp" />
     <ClCompile Include="src\annot\HandleGeom.cpp" />
     <ClCompile Include="src\annot\Shapes.cpp" />
     <ClCompile Include="src\annot\AnnotationList.cpp" />

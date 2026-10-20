@@ -57,6 +57,13 @@ public:
     // the caret and the typed glyphs always sit where the committed label will
     // draw them.
     void SyncToBox();
+    // The property bar's colour picker, taken while the edit is open. The control
+    // draws from the ink it opened with, so without this the new colour waits for
+    // the commit and the box reads as if the click did nothing.
+    void SetInk(Gdiplus::Color ink);
+    // The 字号 picker, likewise: the glyphs change size where they stand. `designPx`
+    // is the picker's logical size; the label converts it and the control follows.
+    void ApplyFontSize(int designPx);
 
     // False when `text` would need more room below the box than the 选区 has. The
     // box cannot scroll, so a change that does not fit is refused.

@@ -58,8 +58,12 @@ public:
     void BltBase(CDC* dc, const CRect& src, CPoint dst);
 
     // 框外右键 brought the region back to the whole screen, so the magnifier is
-    // there to help pick a new one again.
-    void ResetPicked() { m_selPicked = false; }
+    // there to help pick a new one again — and the hover pre-selection starts
+    // over too, rather than leaving a frame nobody is computing any more.
+    void ResetPicked() {
+        m_selPicked = false;
+        m_hover.SetRectEmpty();
+    }
 
     // Off while a modal common dialog has to sit above us; the WM_WINDOWPOS-
     // CHANGING guard below would otherwise undo the demotion itself.
@@ -78,6 +82,14 @@ public:
     // The bars are child windows, so their mouse moves never reach us; they
     // call this so the magnifier can get out of the way.
     void CursorMoved();
+
+    // The hover pre-selection: a frame around the program window under the
+    // cursor, while the desktop under the overlay is still live and no region has
+    // been picked. Recomputed from wherever the cursor is now — the overlay calls
+    // it on every idle move, and the session once as the overlay appears, so a
+    // summon with the cursor already parked on a window shows the frame at once
+    // instead of waiting for the first move.
+    void UpdateHover();
     // A tooltip card appearing, moving, or being withdrawn; `anchor` is the new
     // card's anchor in client coordinates, null when it is only going away. The
     // card is a top-level popup rather than something painted here: a child
@@ -132,7 +144,17 @@ private:
     // m_chrome, never onto the window.
     void DrawChrome(Gdiplus::Graphics& g);
     void DrawDim(const DibCanvas& out, const CRect& lim);
+    // The ink of the shape being dragged or drawn. It goes onto m_out rather than
+    // into m_chrome, because anti-aliasing blends toward whatever is already on
+    // the surface and the chrome buffer is transparent black.
+    void DrawLiveInk(Gdiplus::Bitmap* out, const Gdiplus::Rect& uc);
     void DrawSelectionFrame(Gdiplus::Graphics& g);
+    // The pre-selection frame: the 选区's blue, and none of its handles.
+    void DrawHoverFrame(Gdiplus::Graphics& g);
+    // Whether the hover frame has a reason to exist right now. The same test
+    // decides whether it is computed and whether it is drawn, so the two can
+    // never disagree and leave a frame on screen that nothing maintains.
+    bool HoverActive() const;
     void DrawSizeLabel(Gdiplus::Graphics& g);
     void DrawEditFrame(Gdiplus::Graphics& g);
     void DrawFontDropdown(Gdiplus::Graphics& g);
@@ -243,6 +265,10 @@ private:
     CPoint m_dragStart = { 0, 0 };
     RECT m_startRect = {};
     RECT m_prevRect = {};
+    // The window under the cursor, in client coords, while the region is still
+    // the whole screen. Empty when the cursor is over the desktop itself, which
+    // is what keeps a click there meaning the whole screen as it always did.
+    CRect m_hover{};
     // For a thumb drag: how far below the thumb's top the press landed.
     int m_thumbGrab = 0;
 

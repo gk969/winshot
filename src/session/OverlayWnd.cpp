@@ -8,6 +8,7 @@
 #include "Shapes.h"
 #include "TextEditor.h"
 #include "Loupe.h"
+#include "WindowPick.h"
 #include "AppMessages.h"
 
 #include <emmintrin.h>
@@ -538,6 +539,10 @@ void COverlayWnd::OnPaint() {
         probe.Mark(2);
         DrawDim(m_out, up);
         probe.Mark(3);
+        // The ink of a shape still under the mouse is drawn here, on the frame
+        // that already carries the still and the dim, rather than in the chrome
+        // buffer below. See DrawLiveInk.
+        DrawLiveInk(m_out.gx.get(), uc);
 
         // The chrome goes through a memory DIB and reaches the frame as a blend.
         // GDI+ charges ~0.35ms per call onto a window DC whatever it draws — the
@@ -749,6 +754,38 @@ private:
 };
 }  // namespace
 
+// The ink of a shape still under the mouse goes onto the assembled frame, not
+// into the chrome buffer, and the reason is the ground. GDI+ resolves an
+// anti-aliased edge against the colour already on the surface and writes the
+// result premultiplied, so over the still a pixel at coverage a reads
+// ink*a + ground*(1-a) — which is what a soft edge means. Over the chrome
+// buffer's cleared 0x00000000 it reads ink*a with the colour pulled toward black
+// and the alpha multiplied in a second time, so a partial pixel below the dim's
+// own 0.4 comes out darker than the ground beside it: the dark fringe a dragged
+// arrow or ellipse carried, and why the committed one, which DrawBase blends
+// over the still, looked right. Only the shapes that ask for smoothing can show
+// it, which is why the rectangle and the 马赛克 band never seemed wrong.
+void COverlayWnd::DrawLiveInk(Gdiplus::Bitmap* out, const Gdiplus::Rect& uc) {
+    annot::Annotation* moving = MovingAnno();
+    if (!moving && !m_pending) return;
+
+    Gdiplus::Graphics g(out);
+    g.SetClip(uc);
+    g.SetInterpolationMode(Gdiplus::InterpolationModeNearestNeighbor);
+    g.SetPixelOffsetMode(Gdiplus::PixelOffsetModeNone);
+    // The same clip DrawChrome gives the ink: annotations live in the still's
+    // space, and only the selection is shown.
+    const RECT s = m_session->Sel().Rect();
+    g.SetClip(Gdiplus::RectF((Gdiplus::REAL)s.left, (Gdiplus::REAL)s.top,
+                             (Gdiplus::REAL)(s.right - s.left),
+                             (Gdiplus::REAL)(s.bottom - s.top)),
+              Gdiplus::CombineModeIntersect);
+    // The label being typed into draws no ink of its own while the edit is open:
+    // the input control sits on its box and shows the text.
+    if (moving && moving != m_session->EditingAnno()) moving->Draw(g);
+    if (m_pending) m_pending->Draw(g);
+}
+
 void COverlayWnd::DrawChrome(Gdiplus::Graphics& g) {
     g.SetInterpolationMode(Gdiplus::InterpolationModeNearestNeighbor);
     g.SetPixelOffsetMode(Gdiplus::PixelOffsetModeNone);
@@ -770,7 +807,11 @@ void COverlayWnd::DrawChrome(Gdiplus::Graphics& g) {
     // own would have the ring's clear drop the shape it belongs to.
     annot::Annotation* moving = MovingAnno();
     annot::Annotation* sel = m_session->Selected();
-    annot::Annotation* inked[3] = { moving, m_pending.get(), sel };
+    // The ring's ground only: both shapes' ink is DrawLiveInk's now. A shape
+    // still being drawn has no ring and no selection, so it leaves this empty and
+    // the whole clip below is skipped — which is right, since it has nothing left
+    // in here to blend.
+    annot::Annotation* inked[2] = { moving, sel };
     float il = 0, it = 0, ir = 0, ib = 0;
     bool any = false;
     for (annot::Annotation* a : inked) {
@@ -788,12 +829,10 @@ void COverlayWnd::DrawChrome(Gdiplus::Graphics& g) {
     }
     if (any) {
         ClipTo c(g, Gdiplus::RectF(il, it, ir - il, ib - it), &m_chromeInk);
-        // The label being typed into draws no ink of its own while the edit is
-        // open, even while it is being dragged: the input control sits on its box
-        // and shows the text, so drawing the committed glyphs too is the double
-        // image 文本框双击编辑 shows. The control follows the box as it moves.
-        if (moving && moving != m_session->EditingAnno()) moving->Draw(g);
-        if (m_pending) m_pending->Draw(g);
+        // The ink is already on m_out under here, and the blend leaves those
+        // pixels alone wherever this buffer is still transparent — so the frame
+        // and the ring land on top of the ink rather than replacing it, which is
+        // the order the committed shape has too.
         // Under the markers, so a corner marker reads as one square rather than
         // as a square with a line run through it.
         DrawEditFrame(g);
@@ -805,6 +844,7 @@ void COverlayWnd::DrawChrome(Gdiplus::Graphics& g) {
     ProbeMark(4);
 
     DrawSelectionFrame(g);
+    DrawHoverFrame(g);
     // The stitched tail hangs beside the hole, which is the one part of the
     // selection area this window still paints. It has no rect of its own to
     // offer, so 长截图 keeps paying for the whole region.
@@ -1119,8 +1159,8 @@ void COverlayWnd::DrawFontDropdown(Gdiplus::Graphics& g) {
 
     const HWND hwnd = GetSafeHwnd();
     const int row = Dpi::S(hwnd, tb::kFontRow);
-    const int n = (int)(sizeof(tb::kFontSizes) / sizeof(int));
-    const int cur = m_session->Style().fontSize;
+    const int n = tb::kFontRowCount;
+    const int cur = tb::FontRowForSize(m_session->Style().fontSize);
 
     Gdiplus::SolidBrush back(Gdiplus::Color(0xFFFFFFFF));
     g.FillRectangle(&back, (Gdiplus::REAL)d->left, (Gdiplus::REAL)d->top,
@@ -1136,14 +1176,14 @@ void COverlayWnd::DrawFontDropdown(Gdiplus::Graphics& g) {
 
     for (int i = 0; i < n; ++i) {
         const Gdiplus::REAL y = (Gdiplus::REAL)(d->top + i * row);
-        const bool on = tb::kFontSizes[i] == cur;
+        const bool on = i == cur;
         if (on) {
             Gdiplus::SolidBrush hi(tb::kAccent);
             g.FillRectangle(&hi, (Gdiplus::REAL)d->left, y,
                             (Gdiplus::REAL)d->Width(), (Gdiplus::REAL)row);
         }
         CString s;
-        s.Format(L"%d", tb::kFontSizes[i]);
+        s.Format(L"%d", tb::FontSizeForRow(i));
         Gdiplus::SolidBrush fg(on ? Gdiplus::Color(0xFFFFFFFF) : tb::kInk);
         g.DrawString(s, -1, m_dropFont.get(),
                      Gdiplus::RectF((Gdiplus::REAL)(d->left + pad), y,
@@ -1161,8 +1201,75 @@ int COverlayWnd::HitFontRow(CPoint pt) const {
     const CRect* d = m_session->FontDropdown();
     if (!d || !::PtInRect(*d, pt)) return -1;
     const int i = (pt.y - d->top) / Dpi::S(GetSafeHwnd(), tb::kFontRow);
-    const int n = (int)(sizeof(tb::kFontSizes) / sizeof(int));
-    return i >= 0 && i < n ? i : -1;
+    return i >= 0 && i < tb::kFontRowCount ? i : -1;
+}
+
+// The pre-selection belongs to the gesture of choosing a region and to nothing
+// else. Once a region is picked, a shape is being drawn or dragged, the 长截图
+// hole is open, or a popup is up, a frame around some other window would be
+// commenting on a decision already made.
+bool COverlayWnd::HoverActive() const {
+    if (m_mode != Mode::Idle || m_selPicked || InLongShot()) return false;
+    if (m_session->LongShotEdit() || m_session->Editor() ||
+        m_session->FontDropdown())
+        return false;
+    // IsDefault() is the same fact m_selPicked records, from the other side; both
+    // have to hold or a region set from outside (a restored one, say) gets a
+    // frame chasing it.
+    return m_session->Sel().IsDefault();
+}
+
+void COverlayWnd::UpdateHover() {
+    CRect next;
+    POINT cur{};
+    CRect cl;
+    GetClientRect(&cl);
+    if (HoverActive() && ::GetCursorPos(&cur)) {
+        // GetCursorPos out of a PerMonitorV2 process already gives physical
+        // virtual-screen pixels, which is the space WindowPick both asks and
+        // answers in; no scale factor belongs anywhere here.
+        CPoint client(cur);
+        ScreenToClient(&client);
+        if (cl.PtInRect(client)) {
+            CRect r = winpick::TopWindowUnder(cur);
+            if (!r.IsRectEmpty()) ScreenToClient(&r);
+            next = r;
+        }
+    }
+    if (EqualRect(&next, &m_hover)) return;
+    const CRect was = m_hover;
+    m_hover = next;
+    // The frame is 2px on the window's edge, so only the two rings it could have
+    // changed need repainting — never the interior, which is the mistake that
+    // made selection drags two frames behind the cursor.
+    const int hs = Dpi::S(GetSafeHwnd(), 8);
+    if (!was.IsRectEmpty()) InvalidateRing(was, hs);
+    if (!m_hover.IsRectEmpty()) InvalidateRing(m_hover, hs);
+}
+
+void COverlayWnd::DrawHoverFrame(Gdiplus::Graphics& g) {
+    if (!HoverActive() || m_hover.IsRectEmpty()) return;
+    const RECT s = m_hover;
+    const int w = s.right - s.left, h = s.bottom - s.top;
+    if (w <= 0 || h <= 0) return;
+
+    // The same band the 选区's frame damages, and for the same reason: the 2px
+    // pen straddles the edge.
+    const int hs = Dpi::S(GetSafeHwnd(), 7);
+    ClipBand band(g, Gdiplus::RectF((Gdiplus::REAL)(s.left - hs),
+                                    (Gdiplus::REAL)(s.top - hs),
+                                    (Gdiplus::REAL)(w + 2 * hs),
+                                    (Gdiplus::REAL)(h + 2 * hs)),
+                  Gdiplus::RectF((Gdiplus::REAL)(s.left + 1),
+                                 (Gdiplus::REAL)(s.top + 1),
+                                 (Gdiplus::REAL)(w - 2),
+                                 (Gdiplus::REAL)(h - 2)),
+                  &m_chromeInk);
+    // The blue only — no squares on the edges and corners. There is nothing to
+    // drag yet: the frame is a promise about the click, not a set of grips.
+    Gdiplus::Pen pen(kFrame, 2.0f);
+    g.DrawRectangle(&pen, (Gdiplus::REAL)s.left, (Gdiplus::REAL)s.top,
+                    (Gdiplus::REAL)w, (Gdiplus::REAL)h);
 }
 
 void COverlayWnd::DrawSelectionFrame(Gdiplus::Graphics& g) {
@@ -1403,10 +1510,14 @@ bool COverlayWnd::ResolvePopup(CPoint pt) {
     if (const CRect* d = m_session->FontDropdown()) {
         const int row = HitFontRow(pt);
         if (row >= 0) {
-            m_session->Style().fontSize = tb::kFontSizes[row];
-            m_session->HideFontDropdown();  // ChromeChanged repaints bar and list
-        } else
-            m_session->HideFontDropdown();
+            m_session->Style().fontSize = tb::FontSizeForRow(row);
+            // A row picked while a label is selected or being typed into changes
+            // that label now, not the next one — the list is the size picker for
+            // the box on screen. The press landed on this overlay, so the input
+            // control never lost focus and the edit is still open.
+            m_session->ApplyStyleToSelected();
+        }
+        m_session->HideFontDropdown();  // ChromeChanged repaints bar and list
         return true;
     }
     if (m_session->Editor()) {
@@ -1740,6 +1851,10 @@ void COverlayWnd::OnMouseMove(UINT, CPoint pt) {
         break;
     case Mode::Idle:
         CursorMoved();
+        // The desktop under this window is live, so the pre-selection has to be
+        // re-read from the real window stack on every move rather than from a
+        // list taken at summon: anything could open or move underneath.
+        UpdateHover();
         break;
     }
     // The magnifier rides the cursor through a selection drag, so its card is
@@ -1752,12 +1867,15 @@ void COverlayWnd::OnLButtonUp(UINT, CPoint) {
     if (m_mode == Mode::Creating) {
         SelectionModel& sel = m_session->Sel();
         if (sel.Width() < 3 || sel.Height() < 3) {
-            sel.Set(m_prevRect);
-            // A press without a drag is still a decision: the region is the whole
-            // screen, and it is now picked. The next press moves it or draws in
-            // it instead of starting the same gesture over, which is what makes
-            // the first click on the dimmed desktop do something.
+            // A press without a drag is still a decision. Over a program window
+            // it takes that window, which is what the frame hovering there
+            // promised; over the desktop itself, where no window was eligible, it
+            // is still the whole screen. Either way the region is now picked, so
+            // the next press moves it or draws in it instead of starting the same
+            // gesture over.
+            sel.Set(m_hover.IsRectEmpty() ? m_prevRect : m_hover);
             sel.MarkPicked();
+            m_hover.SetRectEmpty();
         }
     } else if (m_mode == Mode::Drawing) {
         if (m_pending) {

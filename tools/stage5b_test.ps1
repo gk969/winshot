@@ -224,42 +224,49 @@ if ($boxW -lt 40 -or $boxH -lt 18) { "FAIL: 字号 box wrong size"; exit 1 }
 
 $boxCX = [int](($bx[0] + $bx[2]) / 2)
 $boxCY = [int](($bx[1] + $bx[3]) / 2)
+# The box is two targets now: its last 16px is the ▼ that opens the list, and the
+# rest is typed into. Pressing the middle of the box brings up an input control
+# that takes focus, so the list has to be opened off the strip at its right edge.
+$arrowX = $bx[2] - (Sx 8)
 $listTop = $bx[3] + 1 + (Sx 2)
 $rowH = Sx 20
+# 8..32 in steps of 2, so 13 rows; 18 is the 6th and 22 the 8th.
+$rows = 13
+function FontRow([int]$px) { return (($px - 8) / 2) }
 function RowAccent($bmp, [int]$i) {
     $y0 = $listTop + $i * $rowH + 3
     return (AccentCount $bmp ($bx[0] + 2) $y0 ($bx[2] - 2) ($y0 + $rowH - 6))
 }
 function HotRow($bmp) {
     $hot = -1
-    for ($i = 0; $i -lt 6; $i++) { if ((RowAccent $bmp $i) -gt 100) { $hot = $i } }
+    for ($i = 0; $i -lt $rows; $i++) { if ((RowAccent $bmp $i) -gt 100) { $hot = $i } }
     return $hot
 }
 
 # --- the 字号 dropdown ----------------------------------------------------
-Click $boxCX $boxCY
+Click $arrowX $boxCY
 $s2 = Grab 'D:\Project\winshot\obj\s5b_full2.png'
 $card = $null
-for ($y = $listTop; $y -lt $listTop + 6 * $rowH; $y += 10) {
+for ($y = $listTop; $y -lt $listTop + $rows * $rowH; $y += 10) {
     if ($s2.GetPixel($bx[0] + 5, $y).R -gt 245) { $card = $true; break }
 }
 $hot = HotRow $s2
-"dropdown open=$card; highlighted row: $hot  (want 3 = 18)"
-if (-not $card -or $hot -ne 3) { "FAIL: dropdown wrong"; exit 1 }
-[void](Crop $s2 ($bx[0] - 20) ($barTop - 6) 200 180 'D:\Project\winshot\obj\s5b_drop1.png')
+"dropdown open=$card; highlighted row: $hot  (want $(FontRow 18) = 18)"
+if (-not $card -or $hot -ne (FontRow 18)) { "FAIL: dropdown wrong"; exit 1 }
+[void](Crop $s2 ($bx[0] - 20) ($barTop - 6) 200 300 'D:\Project\winshot\obj\s5b_drop1.png')
 
-Click $boxCX ($listTop + 5 * $rowH + [int]($rowH / 2))   # pick 22
+Click $boxCX ($listTop + (FontRow 22) * $rowH + [int]($rowH / 2))   # pick 22
 $s3 = Grab 'D:\Project\winshot\obj\s5b_full3.png'
 "rows highlighted after picking 22: $(HotRow $s3)  (want -1 - list closed)"
-[void](Crop $s3 ($bx[0] - 20) ($barTop - 6) 200 180 'D:\Project\winshot\obj\s5b_drop2.png')
+[void](Crop $s3 ($bx[0] - 20) ($barTop - 6) 200 300 'D:\Project\winshot\obj\s5b_drop2.png')
 
-Click $boxCX $boxCY
+Click $arrowX $boxCY
 $s4 = Grab 'D:\Project\winshot\obj\s5b_full4.png'
 $hot2 = HotRow $s4
-"highlighted row after reopening: $hot2  (want 5 = 22)"
-if ($hot2 -ne 5) { "FAIL: picked size did not stick"; exit 1 }
-[void](Crop $s4 ($bx[0] - 20) ($barTop - 6) 200 180 'D:\Project\winshot\obj\s5b_drop3.png')
-Click $boxCX $boxCY   # close it again
+"highlighted row after reopening: $hot2  (want $(FontRow 22) = 22)"
+if ($hot2 -ne (FontRow 22)) { "FAIL: picked size did not stick"; exit 1 }
+[void](Crop $s4 ($bx[0] - 20) ($barTop - 6) 200 300 'D:\Project\winshot\obj\s5b_drop3.png')
+Click $arrowX $boxCY   # close it again
 
 # --- press on the canvas: the red edit frame ------------------------------
 # The 字号 picked above is 22, so the label box is 40 wide and 22+20 tall at the

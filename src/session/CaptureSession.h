@@ -86,6 +86,15 @@ public:
         return m_fontDrop.IsRectEmpty() ? nullptr : &m_fontDrop;
     }
 
+    // The 字号 box typed into. The input box takes keyboard focus, and taking it
+    // commits a text edit that is running — which ends by deselecting its label.
+    // So the label this size is for has to be remembered here, before focus
+    // moves, and found again by index when the number comes back.
+    void BeginFontSizeEdit();
+    // `px` arrives already clamped: the bar owns the input parsing. `commit` is
+    // false for Esc and for the bar going away mid-edit, which change nothing.
+    void EndFontSizeEdit(int px, bool commit);
+
     // Composites the selection to the clipboard, then closes the capture.
     void Accept();
     void SavePng();
@@ -200,4 +209,6 @@ private:
     POINT m_backdropOff = {};
     // Overlay-client rect of the open 字号 list, empty when it is closed.
     CRect m_fontDrop;
+    // Index into m_annos of the label a typed 字号 is for, -1 with no edit open.
+    int m_fontTarget = -1;
 };

@@ -28,6 +28,11 @@ std::unique_ptr<CaptureSession> CaptureSession::Start() {
     session->m_style.dpiScale =
         Dpi::ForWindow(session->m_overlay.GetSafeHwnd()) / 96.0f;
 
+    // The hotkey usually lands with the cursor already over the window the user
+    // means, so the pre-selection has to be there on the first frame rather than
+    // only after they move the mouse.
+    session->m_overlay.UpdateHover();
+
     return session;
 }
 
@@ -100,6 +105,19 @@ void CaptureSession::ApplyStyleToSelected() {
     if (!a) return;
     const tb::Style& st = m_style;
     a->SetStyle(st.Color(), (Gdiplus::REAL)st.PenWidth());
+    // A label being typed into is drawn by its input control, not by the base
+    // canvas, which skips it, so the shape's own ink and font are not enough to
+    // make the change visible: both have to go into the editor as well, or the
+    // click reads as doing nothing until the edit loses focus.
+    CTextEditor* ed = Editor();
+    if (ed && ed->Label() == a) {
+        ed->SetInk(st.Color());
+        // Sets the label's font too, then rebuilds the control's and moves it
+        // onto the box the new size needs.
+        ed->ApplyFontSize(st.fontSize);
+    } else {
+        a->SetFontSize(st.fontSize);
+    }
     // A mosaic band is filled from the still plus the other shapes, so changing
     // any shape's ink can change what a neighbouring band shows.
     m_mosaic.Invalidate();
@@ -337,7 +355,7 @@ void CaptureSession::ToggleFontDropdown(const RECT* fontBoxScreen) {
     m_overlay.ScreenToClient(r);
     const int gap = Dpi::S(m_overlay.GetSafeHwnd(), tb::kGap);
     const int row = Dpi::S(m_overlay.GetSafeHwnd(), tb::kFontRow);
-    const int h = row * (int)(sizeof(tb::kFontSizes) / sizeof(int));
+    const int h = row * tb::kFontRowCount;
 
     // The reference hangs the list below the box; near the bottom edge that
     // would put it off screen, so it goes above instead.
@@ -354,6 +372,35 @@ void CaptureSession::HideFontDropdown() {
     if (m_fontDrop.IsRectEmpty()) return;
     m_fontDrop.SetRectEmpty();
     if (m_overlay.GetSafeHwnd()) m_overlay.ChromeChanged();
+}
+
+void CaptureSession::BeginFontSizeEdit() {
+    // With a tool armed a press on existing ink selects it, so a label the user
+    // means to resize is normally already selected. The editor case is the one
+    // that needs the extra look-up: a label being typed into is selected too, but
+    // the focus the input box is about to take ends that edit and clears the
+    // selection, so the index has to be captured now.
+    m_fontTarget = SelectedIndex();
+    if (m_fontTarget < 0 && m_editSkip) m_fontTarget = m_annos.IndexOf(m_editSkip);
+    HideFontDropdown();
+}
+
+void CaptureSession::EndFontSizeEdit(int px, bool commit) {
+    const int idx = m_fontTarget;
+    m_fontTarget = -1;
+    if (!commit) return;
+    m_style.fontSize = px;
+    // Resolved by index rather than by pointer: the text edit that was running
+    // when the box was pressed may have been committed and replaced in between.
+    annot::Annotation* a = m_annos.At((size_t)idx);
+    if (!a) return;
+    // A label being typed into is drawn by its input control, which the base
+    // canvas skips, so the control has to change size as well as the shape.
+    CTextEditor* ed = Editor();
+    if (ed && ed->Label() == a) ed->ApplyFontSize(px);
+    else a->SetFontSize(px);
+    m_mosaic.Invalidate();
+    m_overlay.TouchBase();
 }
 
 int CaptureSession::NextBadgeNumber() const {
