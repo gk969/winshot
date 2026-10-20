@@ -12,13 +12,13 @@ Release 版是单个可执行文件，没有安装程序，也不需要额外运
 
 | 文件 | 架构 | 大小 | 说明 |
 | --- | --- | --- | --- |
-| `winshot.exe` | x64 | 3.0 MB | 双击即运行，只在任务栏放一个图标 |
+| `x64/Release/winshot.exe` | x64 | 3.0 MB | 双击即运行，只在任务栏放一个图标 |
 
 仓库：[github.com/gk969/winshot](https://github.com/gk969/winshot)（公开，默认分支 `master`）。
 
-**下载：** [winshot.exe](https://github.com/gk969/winshot/releases/latest/download/winshot.exe)
+**下载：** [winshot.exe](https://raw.githubusercontent.com/gk969/winshot/master/x64/Release/winshot.exe)
 
-> 仓库已经推到 GitHub 了，但**release 还没建**——现在 `releases/latest` 返回 404，仓库里也没有任何 tag，所以上面这个地址暂时点不开。在 GitHub 上建一个 release、把 Release 构建产物以 `winshot.exe` 这个名字作为资源传上去，链接就通了：`releases/latest/download/<名字>` 里的 `<名字>` 必须和资源文件名一字不差。在那之前，本机自己构建的 Release 产物在 `x64\Release\winshot.exe`。
+> 上面这个地址就是仓库里的 `x64\Release\winshot.exe`：这个二进制现在跟源码一起提交在仓库里，所以不建 release 也能下载，而且它和同一提交里的源码对得上。代价是每次改完代码都要重新构建并把 exe 再提交一次，否则下载到的就是旧版——`.gitignore` 里为此只放行了这一个文件，`x64\Debug\` 和 `.pdb` 之类照旧不入库。**这条链接要等这次提交推上 GitHub 之后才点得开。** 想要更正式的下载地址，仍然可以在 GitHub 上建一个 release，把 exe 以 `winshot.exe` 这个名字作为资源传上去，`releases/latest/download/<名字>` 里的 `<名字>` 必须和资源文件名一字不差。
 
 运行环境：Windows 10 / 11 x64。OCR 需要系统装了对应的 `Windows.Media.Ocr` 语言包（中文识别需要中文 OCR 组件）。
 
