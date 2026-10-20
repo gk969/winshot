@@ -7,7 +7,7 @@
 #include "AppMessages.h"
 #include "Compositor.h"
 #include "ClipboardImage.h"
-#include "ExportPng.h"
+#include "Export.h"
 #include "Shapes.h"
 #include "TextEditor.h"
 #include "../ocr/OcrService.h"
@@ -49,7 +49,7 @@ void CaptureSession::OnToolbar(tb::Id id) {
     switch (id) {
     case tb::Id::Undo:     Undo(); break;
     case tb::Id::LongShot: ToggleLongShot(); break;
-    case tb::Id::Save:     SavePng(); break;
+    case tb::Id::Save:     Save(); break;
     case tb::Id::Pin:      Pin(); break;
     case tb::Id::Ocr:      StartOcr(); break;
     case tb::Id::Cancel:   Finish(false); break;
@@ -161,14 +161,14 @@ void CaptureSession::Accept() {
     Finish(true);
 }
 
-void CaptureSession::SavePng() {
+void CaptureSession::Save() {
     std::unique_ptr<Gdiplus::Bitmap> bmp =
         out::RenderSelection(*m_capture, ExportRect(), m_annos, CapOff());
     if (!bmp) return;
 
     // The common dialog is not topmost, so the overlay has to step down for it.
     m_overlay.SetTopmost(false);
-    out::SavePngWithDialog(*bmp, m_overlay.GetSafeHwnd());
+    out::SaveWithDialog(*bmp, m_overlay.GetSafeHwnd());
     m_overlay.SetTopmost(true);
 }
 

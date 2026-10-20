@@ -213,6 +213,14 @@ std::vector<CString> WrapLines(const CString& text, Gdiplus::REAL fontPx,
 
 // ---------------------------------------------------------------- box shapes
 
+Gdiplus::REAL RectPen(Gdiplus::REAL pen) {
+    // The thin dot means 1px for a rectangle and 2px for every other tool, so one
+    // dot on the 粗细 bar stands for two widths. Only this shape can take it: the
+    // rect is the one outline drawn without smoothing, so 1px binarizes to a single
+    // crisp column, while an anti-aliased 1px pen feathers across two half-lit ones.
+    return pen <= 2.0f ? 1.0f : pen;
+}
+
 void ShapeBox::UpdateDrag(Gdiplus::PointF to, bool) {
     m_box = Gdiplus::RectF(std::min(m_origin.X, to.X), std::min(m_origin.Y, to.Y),
                            std::fabs(to.X - m_origin.X),

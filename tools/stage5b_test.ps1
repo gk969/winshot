@@ -382,25 +382,41 @@ $dcb = [W5B+EnumProc] {
 "save dialog windows (winshot pid): $($dlg.Count)"
 if ($dlg.Count -eq 0) { "FAIL: no save dialog"; exit 1 }
 
-$edits = New-Object System.Collections.ArrayList
 $btns = New-Object System.Collections.ArrayList
 $ccb = [W5B+EnumProc] {
     param($h, $l)
     $cls = New-Object System.Text.StringBuilder 256
     [void][W5B]::GetClassName($h, $cls, 256)
-    if ($cls.ToString() -eq 'Edit') { [void]$edits.Add($h) }
     if ($cls.ToString() -eq 'Button') { [void]$btns.Add($h) }
     return $true
 }
 [void][W5B]::EnumChildWindows($dlg[0], $ccb, [IntPtr]::Zero)
-$name = $null
-foreach ($e in $edits) {
-    $t2 = New-Object System.Text.StringBuilder 512
-    [void][W5B]::GetWindowText($e, $t2, 512)
-    if ($t2.ToString() -like '*png*') { $name = $e }
+# The file-name edit. This used to be the Edit whose text looked like a .png
+# path, which only worked while the default name carried an extension -- it does
+# not any more, because the format dropdown has to be free to decide that. The
+# commdlg id cmb1 is no use either: GetSaveFileNameW routes to IFileSaveDialog
+# unless OFN_ENABLEHOOK or OFN_ENABLETEMPLATE forces the classic resource, and
+# the modern dialog has no cmb1 -- measured, GetDlgItem returns zero. The name
+# edit is the one Edit with control id 1001; the address bar's toolbar shares
+# that id, so the class has to be part of the test. The dialog is up before it
+# has finished building its children, hence the retry.
+$names = @()
+for ($try = 0; $try -lt 20; $try++) {
+    $found = New-Object System.Collections.ArrayList
+    $nccb = [W5B+EnumProc] {
+        param($h, $l)
+        $cls = New-Object System.Text.StringBuilder 256
+        [void][W5B]::GetClassName($h, $cls, 256)
+        if ($cls.ToString() -eq 'Edit' -and [W5B]::GetWindowLong($h, -12) -eq 1001) { [void]$found.Add($h) }
+        return $true
+    }
+    [void][W5B]::EnumChildWindows($dlg[0], $nccb, [IntPtr]::Zero)
+    $names = $found.ToArray()
+    if ($names.Count) { break }
+    Start-Sleep -Milliseconds 200
 }
-if (-not $name -and $edits.Count) { $name = $edits[0] }
-if (-not $name) { "FAIL: no file-name edit in the dialog"; exit 1 }
+if ($names.Count -eq 0) { "FAIL: no file-name edit in the dialog"; exit 1 }
+$name = $names[0]
 [void][W5B]::SendMessage($name, $WM_SETTEXT, [IntPtr]::Zero, $OUT)
 $def = $null
 foreach ($b in $btns) {

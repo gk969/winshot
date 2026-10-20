@@ -38,6 +38,11 @@ Gdiplus::REAL BadgeRadiusForPen(Gdiplus::REAL pen);
 // Design px.
 Gdiplus::REAL MosaicBandForPen(Gdiplus::REAL pen);
 
+// The 矩形's stroke for a given 粗细 dot — the one tool that reads the thin dot as
+// 1px. Both the fresh shape and a re-styled one go through it, or the two would
+// disagree. Design px.
+Gdiplus::REAL RectPen(Gdiplus::REAL pen);
+
 // Rect and ellipse share a bounding box and its eight handles; only the paint
 // and the hit test differ.
 class ShapeBox : public Annotation {
@@ -83,7 +88,14 @@ protected:
 
 class ShapeRect : public ShapeBox {
 public:
-    using ShapeBox::ShapeBox;
+    ShapeRect(Gdiplus::PointF from, Gdiplus::Color ink, Gdiplus::REAL pen)
+        : ShapeBox(from, ink, RectPen(pen)) {}
+    // The width the 粗细 dot asks for is not the width this shape draws with, so
+    // both assignment paths map it. Without this one a rect redrawn from the bar
+    // would come back a pixel thicker than one just drawn.
+    void SetStyle(Gdiplus::Color ink, Gdiplus::REAL pen) override {
+        ShapeBox::SetStyle(ink, RectPen(pen));
+    }
     Kind GetKind() const override { return Kind::Rect; }
     bool NeedsBBoxGuide() const override { return false; }
     void Draw(Gdiplus::Graphics& g) const override;

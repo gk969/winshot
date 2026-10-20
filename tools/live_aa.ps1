@@ -3,21 +3,23 @@
 # a DIB cleared to transparent black. GDI+ resolves an edge against the
 # destination colour and writes the result premultiplied, so a pixel at coverage
 # a came out as ink*a*a instead of ink*a: the colour pulled toward black and the
-# alpha multiplied in a second time. Against the dimmed desktop that is darker
-# than the ground beside it, so a dragged arrow or ellipse carried a dark fringe
+# alpha multiplied in a second time. That is darker than the ground beside it,
+# so a dragged arrow or ellipse carried a dark fringe
 # the committed one never had -- DrawBase blends over the still.
 #
-# The witness is the difference between the two frames of one drag. Call the
-# still S, the dim d = 0.4 (kDim is 0x99000000), the ink I and the coverage a.
-# Drawn onto the assembled frame the live pixel is I*a + d*S*(1-a) and the
-# committed one d*(I*a + S*(1-a)), so live - done = I*a*(1-d): never negative,
-# and independent of S, so the desktop behind it does not matter. Drawn onto the
-# transparent buffer it is I*a*a + d*S*(1-a), and the same difference is
-# I*a*(a-d) -- negative for every edge below 40% coverage, about -10 at a=0.2.
+# The witness is the difference between the two frames of one drag. Call the still
+# S, the ink I and the coverage a. Drawn onto the assembled frame the live pixel is
+# I*a + S*(1-a) and the committed one is the same, so the two frames have to match
+# pixel for pixel. Drawn onto the transparent buffer it is I*a*a + S*(1-a), darker
+# than the committed pixel at every coverage below 1 -- about -10 at a=0.2 -- so the
+# sign of the difference is the whole test: no pixel in the shape's box may fall
+# more than 6 below the committed frame.
 #
-# So: no pixel in the shape's box may fall more than 6 below the committed frame,
-# and at least one must land in the 30..120 band only a real anti-aliased edge
-# produces, or the drag proved nothing.
+# The second thing this used to watch for, a live-brighter-than-done pixel in a
+# 30..120 band, only existed because kDim was blended over the committed ink and not
+# over the live one. A tool can only be armed once a region is picked, and a picked
+# region is never dimmed, so that term left along with the dim. What keeps the drag
+# from being vacuous now is that both frames have to carry the same ink.
 Add-Type -AssemblyName System.Drawing, System.Windows.Forms
 Add-Type @"
 using System;
@@ -103,21 +105,32 @@ function Slot([int]$i) {
     return @(($tr.left + $pad + [int]($cell / 2) + $i * $cell),
              [int](($tr.top + $tr.bottom) / 2))
 }
-# live - done over the shape's box, counting the two verdicts. Only the red byte
-# is read: the ink is the default red, and the shape's own alpha ramp is what is
-# under test, not the hue.
+# live - done over the shape's box. Only the red byte is read: the ink is the
+# default red, and the shape's own alpha ramp is what is under test, not the hue.
 function Diff-Frames($live, $done, [int]$x0, [int]$y0, [int]$x1, [int]$y1) {
-    $dark = 0; $edge = 0; $min = 999; $max = -999
+    $dark = 0; $min = 999; $max = -999
     for ($y = $y0; $y -le $y1; $y++) {
         for ($x = $x0; $x -le $x1; $x++) {
             $d = $live.GetPixel($x, $y).R - $done.GetPixel($x, $y).R
             if ($d -lt $min) { $min = $d }
             if ($d -gt $max) { $max = $d }
             if ($d -le -6) { $dark++ }
-            if ($d -ge 30 -and $d -le 120) { $edge++ }
         }
     }
-    return @{ dark = $dark; edge = $edge; min = $min; max = $max }
+    return @{ dark = $dark; min = $min; max = $max }
+}
+# tb::kPalette[0] is (247,56,64) and, with the region picked, the ink is drawn
+# undimmed, so the committed shape is that red exactly. Nothing else the script
+# drags over is.
+function Ink-Count($bmp, [int]$x0, [int]$y0, [int]$x1, [int]$y1) {
+    $n = 0
+    for ($y = $y0; $y -le $y1; $y++) {
+        for ($x = $x0; $x -le $x1; $x++) {
+            $c = $bmp.GetPixel($x, $y)
+            if ($c.R -gt 215 -and $c.G -lt 100 -and $c.B -lt 115) { $n++ }
+        }
+    }
+    return $n
 }
 # One drag, grabbed once with the button still down and once after the release.
 function Measure-Drag([string]$what, [int]$x1, [int]$y1, [int]$x2, [int]$y2,
@@ -131,14 +144,21 @@ function Measure-Drag([string]$what, [int]$x1, [int]$y1, [int]$x2, [int]$y2,
     Up
     $done = Grab ("D:\Project\winshot\obj\la_{0}_done.png" -f $what)
     $r = Diff-Frames $live $done ($x1 - $pad) ($y1 - $pad) ($x2 + $pad) ($y2 + $pad)
+    # Counted before both are disposed: the difference alone cannot tell a clean
+    # drag from one that drew nothing at all, and those two used to be separated by
+    # the half-covered-edge count that the dim used to supply.
+    $li = Ink-Count $live ($x1 - $pad) ($y1 - $pad) ($x2 + $pad) ($y2 + $pad)
+    $di = Ink-Count $done ($x1 - $pad) ($y1 - $pad) ($x2 + $pad) ($y2 + $pad)
     $live.Dispose(); $done.Dispose()
     "${what}: live - done over $($x2 - $x1 + 2*$pad)x$($y2 - $y1 + 2*$pad) px: " +
-        "min $($r.min), max $($r.max), $($r.dark) px at or below -6, $($r.edge) px in 30..120"
+        "min $($r.min), max $($r.max), $($r.dark) px at or below -6; ink $li live / $di done"
     if ($r.dark -gt 0) {
         $script:fail += "the $what still under the button has $($r.dark) px darker than the committed shape (min $($r.min)): its anti-aliasing is blending toward black"
     }
-    if ($r.edge -eq 0) {
-        $script:fail += "the $what drag sampled no half-covered edge (max $($r.max)): the test proved nothing"
+    if ($di -lt 300) {
+        $script:fail += "the committed $what has only $di ink px in its box: the drag drew nothing and the test proved nothing"
+    } elseif ($li -ne $di) {
+        $script:fail += "the $what under the button has $li ink px against $di committed: the live drag is not drawing the shape that gets committed"
     }
 }
 
@@ -157,6 +177,13 @@ if ($sink.Count -eq 0) { 'FAIL: no sink window'; exit 1 }
 Start-Sleep -Seconds 2
 $ov = @(Find-Wins 'WinShotOverlay')
 if ($ov.Count -eq 0) { 'FAIL: no overlay window'; exit 1 }
+
+# A region first: the bar only comes up once there is something to draw on, so
+# until one is dragged out there is no tool slot to click. Deliberately large -- the
+# bar then lands below y=2050, clear of both measurement boxes, and both boxes sit
+# inside the region so neither drag is clipped at its edge.
+MoveTo 200 200; Down; Walk 200 200 3600 2050 20; Up
+Start-Sleep -Milliseconds 400
 
 # --- the ellipse: the curved edge gives an alpha ramp on all four sides -------
 $e = Slot 1

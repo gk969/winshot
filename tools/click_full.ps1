@@ -8,7 +8,9 @@
 # while the region is still unpicked, and its crosshair is a cyan no other part of
 # the UI paints, so it vanishing says m_selPicked is set. The toolbar is placed
 # from the region alone, so its rectangle not moving says the region is still the
-# whole screen. Then the ellipse tool draws on the very next press.
+# whole screen -- and since the bar only appears once a region is picked, the same
+# handle says both things: off screen before the click, on screen after. Then the
+# ellipse tool draws on the very next press.
 Add-Type -AssemblyName System.Drawing, System.Windows.Forms
 Add-Type @"
 using System;
@@ -70,13 +72,15 @@ function Find-Wins([string]$title) {
     [void][CF]::EnumWindows($cb, [IntPtr]::Zero)
     return $found.ToArray()
 }
-function Find-Kids([IntPtr]$parent, [string]$title) {
+function Find-Kids([IntPtr]$parent, [string]$title, [bool]$mustSee = $true) {
     $found = New-Object System.Collections.ArrayList
     $cb = [CF+EnumProc] {
         param($h, $l)
         $t = New-Object System.Text.StringBuilder 256
         [void][CF]::GetWindowText($h, $t, 256)
-        if ($t.ToString() -eq $title -and [CF]::IsWindowVisible($h)) { [void]$found.Add($h) }
+        if ($t.ToString() -eq $title -and (-not $mustSee -or [CF]::IsWindowVisible($h))) {
+            [void]$found.Add($h)
+        }
         return $true
     }
     [void][CF]::EnumChildWindows($parent, $cb, [IntPtr]::Zero)
@@ -240,7 +244,10 @@ if ($sink.Count -eq 0) { Bail 'no sink window' }
 Start-Sleep -Seconds 2
 $ov = @(Find-Wins 'WinShotOverlay')
 if ($ov.Count -eq 0) { Bail 'no overlay window' }
-$t = @(Find-Kids $ov[0] 'WinShotToolbar')
+# The one child lookup that must not filter on visibility: the bar is created
+# hidden and only a picked region shows it, so its handle exists here while it is
+# still off screen -- and that is the first half of what this script now checks.
+$t = @(Find-Kids $ov[0] 'WinShotToolbar' $false)
 if ($t.Count -eq 0) { Bail 'no toolbar' }
 
 # --- the magnifier is up while the whole screen is still unpicked ------------
@@ -249,8 +256,13 @@ $a = Grab 'D:\Project\winshot\obj\click_full_before.png'
 $cyan0 = CyanCount $a $card[0] $card[1] $card[2] $card[3]
 $a.Dispose()
 $tr0 = Rect-Of $t[0]
-"before the click: loupe crosshair $cyan0 cyan px in $($card[2]-$card[0]+1)x$($card[3]-$card[1]+1), toolbar at $($tr0.left),$($tr0.top)"
+$vis0 = [CF]::IsWindowVisible($t[0])
+"before the click: loupe crosshair $cyan0 cyan px in $($card[2]-$card[0]+1)x$($card[3]-$card[1]+1), toolbar visible=$vis0 at $($tr0.left),$($tr0.top)"
 if ($cyan0 -lt 300) { $fail += "the magnifier card was not up before the click (crosshair=$cyan0)" }
+# The bar carries the drawing tools, and with the whole screen still unpicked there
+# is nothing to draw on, so it has to be off screen -- and its rect still says where
+# it would sit, which is what makes it a witness about the region below.
+if ($vis0) { $fail += 'the toolbar was already on screen before the click, while the whole screen was still unpicked' }
 
 # --- one click on the dimmed background --------------------------------------
 Down; Up
@@ -258,8 +270,10 @@ $b = Grab 'D:\Project\winshot\obj\click_full_after.png'
 $cyan1 = CyanCount $b $card[0] $card[1] $card[2] $card[3]
 $b.Dispose()
 $tr1 = Rect-Of $t[0]
-"after the click:  loupe crosshair $cyan1 cyan px, toolbar at $($tr1.left),$($tr1.top)"
+$vis1 = [CF]::IsWindowVisible($t[0])
+"after the click:  loupe crosshair $cyan1 cyan px, toolbar visible=$vis1 at $($tr1.left),$($tr1.top)"
 if ($cyan1 -gt 40) { $fail += "the magnifier is still up after the click (crosshair=$cyan1): the region was not picked" }
+if (-not $vis1) { $fail += 'the toolbar was still hidden after the click picked the whole screen: the bar never came up' }
 if (-not (Same-Rect $tr0 $tr1)) {
     $fail += "the toolbar moved from $($tr0.left),$($tr0.top) to $($tr1.left),$($tr1.top): the region is no longer the whole screen"
 }

@@ -198,9 +198,11 @@ for ($i = 0; $i -le 2; $i++) {
     Keys '^z'
     Start-Sleep -Milliseconds 500
 }
-"pen widths: $($pen[0]) -> $($pen[1]) -> $($pen[2]) (tb::kDotSizes is 2/4/8)"
+# The thin dot is 2px in tb::kDotSizes and 1px for a rectangle: annot::RectPen maps
+# it there and nowhere else, so this loop measures the one tool that differs.
+"pen widths: $($pen[0]) -> $($pen[1]) -> $($pen[2]) (a rect reads the dots as 1/4/8)"
 for ($i = 0; $i -le 2; $i++) {
-    $want = @(2, 4, 8)[$i]
+    $want = @(1, 4, 8)[$i]
     if ([Math]::Abs($pen[$i] - $want) -gt 1) {
         $fail += "width dot $i draws a $($pen[$i]) px stroke, want about ${want}: the bigger dot changed the pen too"
     }

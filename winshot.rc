@@ -1,0 +1,9 @@
+// The exe's icon. This is the only icon in the binary, so the shell takes it as the
+// file icon; TrayIcon.cpp loads the same IDI_APP_ICON for the notification area.
+//
+// Deliberately no RT_MANIFEST statement here: app.manifest already reaches the link
+// through the Manifest tool (winshot.vcxproj's AdditionalManifestFiles), and a second
+// one is a duplicate-manifest merge error.
+#include "resource.h"
+
+IDI_APP_ICON ICON "res\\winshot.ico"

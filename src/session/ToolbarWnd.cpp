@@ -65,7 +65,9 @@ BOOL CToolbarWnd::Create(CWnd* parent, CaptureSession* session) {
                                       nullptr, nullptr);
     if (!cls) return FALSE;
 
-    if (!CreateEx(0, cls, L"WinShotToolbar", WS_CHILD | WS_VISIBLE,
+    // Created hidden on purpose: COverlayWnd::LayoutChrome decides whether the bar
+    // is on screen, and it has not been earned until the user has a region.
+    if (!CreateEx(0, cls, L"WinShotToolbar", WS_CHILD,
                   0, 0, 0, 0, parent->GetSafeHwnd(), nullptr))
         return FALSE;
 

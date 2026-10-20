@@ -330,6 +330,13 @@ void COverlayWnd::LayoutChrome() {
     if (!m_toolbar.GetSafeHwnd()) return;
     // In 长截图 the bars are hidden and the long-shot bar places itself.
     if (InLongShot()) return;
+    // The bar holds the drawing tools, and there is nothing to draw on until the
+    // user has a region — one click on the desktop or on a window, or a drag of
+    // their own. BeginCreate clears the default flag on the press, so the mode test
+    // is what keeps the bar out of the way while that drag is still going.
+    const bool picked = !m_session->Sel().IsDefault() && m_mode != Mode::Creating;
+    const bool shown = ::IsWindowVisible(m_toolbar.GetSafeHwnd()) != FALSE;
+    if (shown != picked) m_toolbar.ShowWindow(picked ? SW_SHOWNA : SW_HIDE);
     const int pb = m_propbar.Visible() ? m_propbar.BarHeight() : 0;
     m_toolbar.Place(pb);
     if (pb) m_propbar.PlaceBelow(&m_toolbar);
@@ -1039,10 +1046,16 @@ bool COverlayWnd::LoupeCursor(CPoint* at) const {
     GetClientRect(&cl);
     if (!cl.PtInRect(p)) return false;
 
+    // Both bars have to be asked whether they are on screen before their rect is:
+    // GetWindowRect answers for a hidden window too, and the toolbar is hidden
+    // whenever the loupe is up, so an unguarded test would retire the card over
+    // empty desktop.
     CRect r;
-    m_toolbar.GetWindowRect(&r);
-    ScreenToClient(&r);
-    if (r.PtInRect(p)) return false;
+    if (::IsWindowVisible(m_toolbar.GetSafeHwnd())) {
+        m_toolbar.GetWindowRect(&r);
+        ScreenToClient(&r);
+        if (r.PtInRect(p)) return false;
+    }
     if (m_propbar.Visible()) {
         m_propbar.GetWindowRect(&r);
         ScreenToClient(&r);
@@ -2085,7 +2098,7 @@ void COverlayWnd::OnKeyDown(UINT nChar, UINT nRepCnt, UINT nFlags) {
             return;
         }
         if (nChar == 'S') {
-            m_session->SavePng();
+            m_session->Save();
             return;
         }
     }

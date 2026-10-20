@@ -59,13 +59,23 @@ function Menu-Wins() {
     # to IntPtr by accident while a two-element one does not.
     return $list.ToArray()
 }
-# Centres of our icons in the tray strip, keyed on the red dot.
+# Centres of our icons in the tray strip, keyed on the selection blue of the crop
+# frame — the exe's own icon, which the tray now loads from the same resource.
 #
-# Keying on the white field instead merges the icon with its neighbours: the
-# monochrome system icons to the right are only a couple of pixels apart, so a
-# run that starts on ours swallows them and its centre lands on one of them —
-# which is why a right click there opened nothing. The dot is ~5 px across and
-# only our icon has one, so it pins the centre exactly.
+# The old key was the red dot the hand-drawn tray icon carried, and that icon is
+# gone. Blue finds our icon, but it is a candidate key and not a unique one: this
+# strip also holds a Bluetooth glyph and a phone-transfer glyph, both saturated
+# blue, and measured they pass the same test at 14 and 17 columns against ours at
+# 17. So the width and ink bounds below narrow the list without emptying it, and
+# what actually identifies ours is the four-row menu further down — which is the
+# design this file has always had, and the reason a coloured neighbour is a slow
+# run rather than a wrong answer.
+#
+# What the old comment warned about still applies to any key: a run that reaches
+# across into a neighbour puts the click on the neighbour instead, which is why the
+# run has to stay about one icon wide. The frame spans most of the icon's own width,
+# so the bound is wider than the dot's was, and a run wider still is two icons
+# merged rather than one.
 function Scan-Tray-Icons {
     $va = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds
     $x0 = $va.Right - 620; $x1 = $va.Right - 44      # stops short of the edge
@@ -78,21 +88,21 @@ function Scan-Tray-Icons {
     $g.Dispose()
     $bmp.Save('D:\Project\winshot\obj\tray_strip.png')
 
-    $white = New-Object int[] $w
-    $red = New-Object int[] $w
+    $blue = New-Object int[] $w
     for ($x = 0; $x -lt $w; $x++) {
         for ($y = 0; $y -lt $h; $y++) {
             $c = $bmp.GetPixel($x, $y)
-            if ($c.R -gt 230 -and $c.G -gt 230 -and $c.B -gt 230) { $white[$x]++ }
-            # The 0xFFFA373A dot: red with little green or blue.
-            elseif ($c.R -gt 190 -and $c.G -lt 110 -and $c.B -lt 110) { $red[$x]++ }
+            # (30,159,212) at full coverage; the frame's anti-aliased edge over the
+            # dark strip falls to about (32,64,82) at a quarter, so it is the margin
+            # between blue and red that carries the test, not the absolute level.
+            if ($c.B -gt 70 -and ($c.B - $c.R) -gt 45) { $blue[$x]++ }
         }
     }
     $bmp.Dispose()
 
     $runs = @(); $cur = $null; $gap = 0
     for ($x = 0; $x -lt $w; $x++) {
-        if ($red[$x] -ge 3) {
+        if ($blue[$x] -ge 2) {
             if ($null -eq $cur) { $cur = @($x, $x) } else { $cur[1] = $x }
             $gap = 0
         } elseif ($null -ne $cur) {
@@ -104,20 +114,18 @@ function Scan-Tray-Icons {
 
     $out = @()
     foreach ($r in $runs) {
-        # A dot is a handful of columns; a wider red stretch is something else.
-        if ($r[1] - $r[0] -gt 10) { continue }
-        $c = [int](($r[0] + $r[1]) / 2)
-        # The dot sits in the middle of a white field, so the icon's edges are
-        # a fixed distance either side. Requiring the field keeps a stray red
-        # pixel on another icon from reading as ours: the neighbours with warm
-        # pixels reach 8 here, ours 15.
-        $field = 0
-        for ($x = [Math]::Max(0, $c - 14); $x -le [Math]::Min($w - 1, $c + 14); $x++) {
-            if ($white[$x] -ge 2) { $field++ }
-        }
-        if ($field -lt 12) { continue }
-        $out += , @{ x = $x0 + $c; y = [int](($y0 + $y1) / 2)
-                     span = "$($x0 + $r[0])..$($x0 + $r[1])"; dot = $field }
+        $wide = $r[1] - $r[0]
+        # Narrower than an icon is a stray pixel; wider than one is a run that has
+        # already swallowed a neighbour, and its centre would miss.
+        if ($wide -lt 6 -or $wide -gt 22) { continue }
+        $ink = 0
+        foreach ($x in $r[0]..$r[1]) { $ink += $blue[$x] }
+        # A frame is empty inside, so a whole icon is only a couple of hundred blue
+        # px; well under that is a glint on something else, not an icon.
+        if ($ink -lt 40) { continue }
+        $out += , @{ x = $x0 + [int](($r[0] + $r[1]) / 2)
+                     y = [int](($y0 + $y1) / 2)
+                     span = "$($x0 + $r[0])..$($x0 + $r[1])"; blue = $ink }
     }
     return $out
 }
@@ -175,10 +183,18 @@ $fail = @()
 # and leave a button behind; the shell retires one per click on it.
 Get-Process winshot -ErrorAction SilentlyContinue | Stop-Process -Force
 Start-Sleep -Milliseconds 800
+$prev = ''
 for ($round = 0; $round -lt 10; $round++) {
     $stale = @(Scan-Tray-Icons)
     if (-not $stale.Count) { break }
-    "pruning round ${round}: $(($stale | ForEach-Object { $_.span }) -join '  ')"
+    $sig = ($stale | ForEach-Object { $_.span }) -join '  '
+    "pruning round ${round}: $sig"
+    # A dead winshot icon retires when clicked, so the list shrinks each round.
+    # Once it stops shrinking the rest are other apps' blue icons, which no number
+    # of clicks removes, and going round again only costs a second.
+    if ($sig -eq $prev) { '  unchanged: what is left is not ours, moving on'
+        break }
+    $prev = $sig
     foreach ($c in $stale) {
         Click-At $c.x $c.y $LEFTDOWN $LEFTUP
         # A click that misses the button opens the taskbar's own menu, which then

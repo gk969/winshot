@@ -291,22 +291,23 @@ if ($L - $X -lt $GAP - 2 -or $T - $Y -lt $GAP - 2) {
     $fail += "card at $L,$T is not $GAP px clear of the cursor at $X,$Y"
 }
 
-# --- the magnifier gets out of the way -------------------------------------
+# --- and nothing has to get out of the way ---------------------------------
+# This script never picks a region, and the bar only exists once one is picked, so
+# there is no bar for the magnifier to yield to. It has to keep drawing at the
+# bottom centre of the screen -- exactly where the toolbar used to sit, and where
+# the card used to be retired because a bar was under the cursor there.
 $bars = @(VisibleBars $ov[0])
-"visible bars: $($bars.Count)"
+"visible bars while the region is unpicked: $($bars.Count) (want 0)"
 foreach ($b in $bars) { "  child $($b.left),$($b.top) .. $($b.right),$($b.bottom)" }
-if ($bars.Count -eq 0) { $fail += 'no toolbar found to hide behind'; $bars = @(@{ left = 0; top = ($scrH - 40); right = 400; bottom = ($scrH - 8) }) }
-# EnumChildWindows is recursive, so the widest one is the toolbar itself.
-$bar = @($bars | Sort-Object { ($_.right - $_.left) } -Descending)[0]
-"toolbar: $($bar.left),$($bar.top) .. $($bar.right),$($bar.bottom)"
-$bx2 = [int](($bar.left + $bar.right) / 2); $by2 = [int](($bar.top + $bar.bottom) / 2)
+if ($bars.Count -ne 0) { $fail += "$($bars.Count) child bars were on screen before any region was picked" }
+$bx2 = [int](($scrW - $BOXW) / 2); $by2 = ($scrH - 24)
 $cd2 = Card $bx2 $by2
 MoveTo $bx2 $by2
 Start-Sleep -Milliseconds 400
 $s2 = Grab 'D:\Project\winshot\obj\s6_full2.png'
-$hidden = CrossCount $s2 ($cd2[0] - 4) ($cd2[1] - 4) ($cd2[0] + $BOXW + 3) ($cd2[1] + $CARDH + 3)
-"crosshair px over the toolbar: $hidden (want 0)"
-if ($hidden -gt 20) { $fail += 'magnifier still drawn over the toolbar' }
+$shown = CrossCount $s2 ($cd2[0] - 4) ($cd2[1] - 4) ($cd2[0] + $BOXW + 3) ($cd2[1] + $CARDH + 3)
+"crosshair px at the bottom centre: $shown (want > 300)"
+if ($shown -lt 300) { $fail += "the magnifier drew only $shown crosshair px at the bottom centre: something there is still hiding the card" }
 
 MoveTo $X $Y
 Start-Sleep -Milliseconds 400
@@ -315,42 +316,10 @@ $back = CrossCount $s3 $fx $fy ($fx + $fw - 1) ($fy + $fh - 1)
 "crosshair px after moving back: $back (want > 300)"
 if ($back -lt 300) { $fail += 'magnifier did not come back' }
 
-# --- and hides while a tool is armed ---------------------------------------
-# Arming the tool grows the bar downward, and near the screen's bottom edge that
-# is what decides where the bar sits, so the toolbar moves. Every click here has
-# to re-read its position rather than reuse one taken before the tool was armed.
-function Toolbar-Of($overlay) {
-    $b = @(VisibleBars $overlay)
-    if ($b.Count -eq 0) { return $null }
-    # EnumChildWindows is recursive, so the widest one is the toolbar itself.
-    return @($b | Sort-Object { ($_.right - $_.left) } -Descending)[0]
-}
-function Click-RectTool($overlay) {
-    $t = Toolbar-Of $overlay
-    if (-not $t) { return }
-    Click ($t.left + 4 + 13) ([int](($t.top + $t.bottom) / 2))
-}
-Click-RectTool $ov[0]
-Start-Sleep -Milliseconds 300
-$armed = @(VisibleBars $ov[0]).Count -ge 2
-"tool armed (property bar up): $armed"
-if (-not $armed) { $fail += 'could not arm the rect tool' }
-else {
-    MoveTo $X $Y
-    Start-Sleep -Milliseconds 400
-    $s4 = Grab 'D:\Project\winshot\obj\s6_full4.png'
-    $withTool = CrossCount $s4 $fx $fy ($fx + $fw - 1) ($fy + $fh - 1)
-    "crosshair px with a tool armed: $withTool (want 0)"
-    if ($withTool -gt 20) { $fail += 'magnifier drawn while a tool is armed' }
-}
-
-# 按c only copies while the magnifier is up, so the tool has to go back to sleep
-# before the key means anything. Clicking the active tool again drops it.
-Click-RectTool $ov[0]
-Start-Sleep -Milliseconds 300
-$disarmed = @(VisibleBars $ov[0]).Count -lt 2
-"tool disarmed: $disarmed"
-if (-not $disarmed) { $fail += 'could not disarm the rect tool' }
+# Arming a tool used to be a second way to hide the magnifier, and that state is
+# gone rather than changed: the only way to arm one is to click a slot in the bar,
+# and the bar is only on screen once a region is picked, at which point the card is
+# already gone. stage5_test and anno_style still cover arming and disarming.
 
 # --- 按c复制色号, and that is the whole capture ----------------------------
 # Last, because copying the colour is the whole request: the capture ends there
@@ -358,8 +327,8 @@ if (-not $disarmed) { $fail += 'could not disarm the rect tool' }
 # only reaches the overlay while it is the foreground window, and the sentinel
 # rules out a leftover clipboard from whichever test ran last.
 $want = '{0},{1},{2}' -f $src.R, $src.G, $src.B
-# Back over the desktop: over the toolbar there is no magnifier, so no sampled
-# pixel and nothing for the key to copy.
+# Back over the sampled point: the last section left the cursor at the bottom of
+# the screen, and the key copies whatever the card is reading there, not $src.
 MoveTo $X $Y
 Start-Sleep -Milliseconds 400
 [System.Windows.Forms.Clipboard]::SetText('sentinel')

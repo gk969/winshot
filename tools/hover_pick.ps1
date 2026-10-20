@@ -275,7 +275,10 @@ if ($f2 -lt 0.9) {
 }
 
 # --- a click adopts it ----------------------------------------------------------
+# Toolbar-Rect only sees visible children, so a null here is the answer being asked
+# for: the bar is the reward for a picked region and none is picked yet.
 $tr0 = Toolbar-Rect
+if ($tr0) { $fail += "the toolbar was on screen at y=$($tr0.top) before any region had been picked" }
 $cx = [int](($b2.left + $b2.right) / 2); $cy = [int](($b2.top + $b2.bottom) / 2)
 Click $cx $cy
 Start-Sleep -Milliseconds 700

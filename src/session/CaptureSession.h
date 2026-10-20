@@ -97,7 +97,8 @@ public:
 
     // Composites the selection to the clipboard, then closes the capture.
     void Accept();
-    void SavePng();
+    // Opens Save As; the format the dialog settles on writes PNG or JPEG.
+    void Save();
 
     // OCR runs on a worker thread; its toolbar slot stays grey until the text
     // comes back, which may be after the capture itself is gone.

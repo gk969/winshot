@@ -3,7 +3,7 @@
 
 #include "../Dpi.h"
 #include "../out/ClipboardImage.h"
-#include "../out/ExportPng.h"
+#include "../out/Export.h"
 
 namespace {
 
@@ -176,7 +176,7 @@ void CPinWnd::ShowMenu(CPoint screenPt) {
             // The common dialog is not topmost and this window is.
             ::SetWindowPos(GetSafeHwnd(), HWND_NOTOPMOST, 0, 0, 0, 0,
                            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
-            out::SavePngWithDialog(*m_bmp, GetSafeHwnd());
+            out::SaveWithDialog(*m_bmp, GetSafeHwnd());
             ::SetWindowPos(GetSafeHwnd(), HWND_TOPMOST, 0, 0, 0, 0,
                            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
         }

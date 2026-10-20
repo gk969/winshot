@@ -91,7 +91,7 @@
     <ClInclude Include="src\annot\AnnotationList.h" />
     <ClInclude Include="src\annot\Commands.h" />
     <ClInclude Include="src\out\Compositor.h" />
-    <ClInclude Include="src\out\ExportPng.h" />
+    <ClInclude Include="src\out\Export.h" />
     <ClInclude Include="src\out\ClipboardImage.h" />
     <ClInclude Include="src\out\ClipboardText.h" />
     <ClInclude Include="src\pin\PinWnd.h" />
@@ -100,6 +100,7 @@
     <ClInclude Include="src\longshot\Stitcher.h" />
     <ClInclude Include="src\longshot\FrameGrab.h" />
     <ClInclude Include="src\longshot\LongShot.h" />
+    <ClInclude Include="resource.h" />
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="src\stdafx.cpp">
@@ -125,7 +126,7 @@
     <ClCompile Include="src\annot\AnnotationList.cpp" />
     <ClCompile Include="src\annot\Commands.cpp" />
     <ClCompile Include="src\out\Compositor.cpp" />
-    <ClCompile Include="src\out\ExportPng.cpp" />
+    <ClCompile Include="src\out\Export.cpp" />
     <ClCompile Include="src\out\ClipboardImage.cpp" />
     <ClCompile Include="src\out\ClipboardText.cpp" />
     <ClCompile Include="src\pin\PinWnd.cpp" />
@@ -140,6 +141,10 @@
   </ItemGroup>
   <ItemGroup>
     <None Include="app.manifest" />
+    <None Include="res\winshot.ico" />
+  </ItemGroup>
+  <ItemGroup>
+    <ResourceCompile Include="winshot.rc" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
 </Project>

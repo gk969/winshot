@@ -7,7 +7,7 @@
 #include "Glyphs.h"
 #include "OverlayWnd.h"
 #include "out/ClipboardImage.h"
-#include "out/ExportPng.h"
+#include "out/Export.h"
 
 #include <algorithm>
 #include <cstring>
@@ -830,7 +830,7 @@ void Controller::OnSave() {
         if (bar) ::SetWindowPos(bar, HWND_NOTOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
         if (tip) ::SetWindowPos(tip, HWND_NOTOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
 
-        out::SavePngWithDialog(*bmp, bar);
+        out::SaveWithDialog(*bmp, bar);
 
         if (bar) ::SetWindowPos(bar, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
         if (tip) ::SetWindowPos(tip, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
