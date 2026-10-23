@@ -18,6 +18,7 @@ BEGIN_MESSAGE_MAP(CPinWnd, CWnd)
     ON_WM_ERASEBKGND()
     ON_WM_NCHITTEST()
     ON_WM_NCLBUTTONDBLCLK()
+    ON_WM_NCRBUTTONDOWN()
     ON_WM_MOUSEWHEEL()
     ON_WM_LBUTTONDOWN()
     ON_WM_MBUTTONDOWN()
@@ -155,13 +156,23 @@ void CPinWnd::OnKeyDown(UINT nChar, UINT, UINT) {
 void CPinWnd::ShowMenu(CPoint screenPt) {
     CMenu menu;
     if (!menu.CreatePopupMenu()) return;
-    menu.AppendMenu(MF_STRING, kCmdCopy, L"复制到剪贴板");
-    menu.AppendMenu(MF_STRING, kCmdSave, L"保存为 PNG…");
+    menu.AppendMenu(MF_STRING, kCmdCopy, L"复制");
+    menu.AppendMenu(MF_STRING, kCmdSave, L"保存");
     menu.AppendMenu(MF_SEPARATOR);
     menu.AppendMenu(MF_STRING, kCmdClose, L"关闭");
 
+    // A pin sits on the desktop while some other app holds the focus, and
+    // TrackPopupMenu leaves its menu up on an outside click for a window that is
+    // not foreground. The PostMessage below is the other half of that pair.
+    ::SetForegroundWindow(GetSafeHwnd());
+
+    // Top-left corner at the press, so the menu grows down-right and leaves the
+    // patch of screen the right click was aiming at. TrackPopupMenu flips it back
+    // inside the work area on its own, which is why a pin against the right or
+    // bottom edge needs no clamping here. The tray menu keeps the opposite
+    // alignment on purpose: the tray sits at the bottom of the screen.
     const int cmd = (int)::TrackPopupMenu(menu.GetSafeHmenu(),
-                                          TPM_BOTTOMALIGN | TPM_LEFTALIGN | TPM_RIGHTBUTTON |
+                                          TPM_TOPALIGN | TPM_LEFTALIGN | TPM_RIGHTBUTTON |
                                               TPM_RETURNCMD,
                                           screenPt.x, screenPt.y, 0, GetSafeHwnd(), nullptr);
     // Same as the tray menu: without this the menu stays up on an outside click.
@@ -189,6 +200,14 @@ void CPinWnd::ShowMenu(CPoint screenPt) {
 
 void CPinWnd::OnRButtonDown(UINT, CPoint pt) {
     ClientToScreen(&pt);
+    ShowMenu(pt);
+}
+
+// The image is HTCAPTION, so this is where a right click actually lands, and the
+// point arrives in screen coordinates already. It has to be the down: for a
+// caption hit the default handler starts its own modal system-menu tracking loop
+// on the down, and the up never reaches us at all.
+void CPinWnd::OnNcRButtonDown(UINT, CPoint pt) {
     ShowMenu(pt);
 }
 

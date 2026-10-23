@@ -20,6 +20,11 @@ protected:
     afx_msg LRESULT OnNcHitTest(CPoint pt);
     // The client area is HTCAPTION, so a double click would otherwise maximize.
     afx_msg void OnNcLButtonDblClk(UINT hitTest, CPoint pt);
+    // Same reason: everywhere but the ✕ a right click is a non-client message, so
+    // this is the one that actually brings up the menu. It has to be the down --
+    // the default handler tracks its own system menu from the down and the up
+    // never arrives.
+    afx_msg void OnNcRButtonDown(UINT hitTest, CPoint pt);
     afx_msg BOOL OnMouseWheel(UINT nFlags, short zDelta, CPoint pt);
     // Only the ✕ is HTCLIENT, so this fires for that square and nothing else.
     afx_msg void OnLButtonDown(UINT nFlags, CPoint pt);

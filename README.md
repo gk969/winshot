@@ -32,7 +32,7 @@ Release 版是单个可执行文件，没有安装程序，也不需要额外运
 * **撤销**：`Ctrl+Z` 或工具栏撤销，逐步回退每一次增删改。
 * **四种输出**：复制到剪贴板（`✓`）、存 PNG 或 JPG（`Ctrl+S`）、钉在桌面、OCR 识字。
 * **长截图**：选区变成实时画面的"洞"，滚动目标窗口，程序每 150ms 抓一帧自动拼接，结果可以远高于屏幕。停止滚动后可以编辑拼接结果，也可以直接存 PNG 或 JPG——存完同样结束截图，编辑器和覆盖层一起走。
-* **钉在桌面**：把选区贴回桌面成为独立窗口，截图退出后仍然存活，可拖动、滚轮缩放、复制、另存。
+* **钉在桌面**：把选区贴回桌面成为独立窗口，截图退出后仍然存活，可拖动、滚轮缩放。在它身上任意处右键出菜单（复制 / 保存 / 关闭，弹在点击点右下方），中键、`Esc`、右上角的 ✕ 也都能关掉它。
 * **OCR**：用系统自带的 `Windows.Media.Ocr` 识别选区文字，结果开在一个非模态窗口里，可以全选复制。
 * **托盘菜单**：截图、开机启动开关、关于、退出。
 
@@ -207,6 +207,8 @@ dim 也不走 `AlphaBlend`：GDI 加速的是 blend 到窗口 DC，而不是 ble
 
 **钉图**（`PinWnd`）—— 无边框 topmost 顶层窗。client 区返回 `HTCAPTION` 所以能拖，只有角上的 ✕ 是 `HTCLIENT`（顺带要拦掉双击最大化）。尺寸只由滚轮决定：拖一个无边框矩形的边，误触比命中更容易。位图按自然尺寸存着，窗口是它的 `m_scale` 倍，所以放大回去不会重采样。中键、`Esc`、右键菜单（复制 / 保存 / 关闭）都能关掉它。
 
+右键菜单挂在 `OnNcRButtonDown` 上，不是 `OnRButtonDown`：`HTCAPTION` 上的右键按下会被默认处理拿去跟踪它自己的系统菜单，抬起根本不发给你，所以 client 那个处理只对 ✕ 那 22px 有效。菜单弹在点击点右下方（`TPM_TOPALIGN | TPM_LEFTALIGN | TPM_RIGHTBUTTON`，即左边和顶边钉在按下点）：按下点上方那块画面正是用户右键时在看的内容，菜单压上去就白看了。贴屏幕右边或下边时 `TrackPopupMenu` 自己翻回来，不用自己夹；托盘菜单是反过来的往上弹，那是对的，托盘就在屏幕底边。而 `TrackPopupMenu` 对不是前台窗的窗弹菜单，点外面不会消失 —— 钉图是 topmost 却通常没有焦点，所以 `SetForegroundWindow` 和收尾那句 `PostMessage(WM_NULL)` 是一对，缺一个就少一半。
+
 **OCR**（`OcrService`）—— C++/WinRT 调 `Windows.Media.Ocr`。引擎优先 `zh-CN`，其次 `en-US`，都没有就退回用户配置文件语言。BGRA 字节序和 `LockBits` 的 `Format32bppARGB` 一致，所以直接 `SoftwareBitmap::CreateCopyFromBuffer`，没有转换也没有 PNG 往返。识别从不在 UI 线程上跑：`StartAsync` 自己起线程、`winrt::init_apartment(multi_threaded)`（MFC 不为它没创建的线程初始化套间），完了把结果 `PostMessage` 回 `WM_APP_OCR_DONE`，位图是 move 进去的，所以截图可以先关掉而工作继续。结果窗非模态，而且要能设成 topmost——覆盖层是 topmost，压在它下面就等于看不见。
 
 **输出**（`out/`）—— `RenderSelection` = 从 still 裁出选区 + 标注 clip 到同一个矩形。剪贴板同时写 `CF_DIB` 和 `CF_BITMAP`：`CF_DIB` 谁都收，但 .NET 的 `Clipboard.GetImage()` 之类按名字要 `CF_BITMAP`，只给前者它们渲染不出东西。PNG 和 JPEG 都走 GDI+ 编码器（按 MIME 找 CLSID），写哪一种**只看最终扩展名**：`.jpg`/`.jpeg` 走 JPEG，其余走 PNG。JPEG 要显式带质量参数（90），`EncoderParameter` 的 `Type` 必须是 `EncoderParameterValueTypeLong`、指针指向一个 `LONG`，类型不对 GDI+ 会静默忽略它并用编码器自己的默认 75，对截图里那种实色边框和文字有可见振铃。格式有两个地方能选——对话框的"保存类型"下拉，和自己敲的扩展名——两者必须给出同一个答案，所以规则只有一条：**名字里有扩展名就听名字的，没有就补下拉选中那一条的**。这里有个坑：`OPENFILENAMEW::lpstrDefExt` 是**单个**值、不跟随过滤器，写死 `L"png"` 的话 Windows 会在用户选了 JPEG 之后照样补 `.png`，下拉等于白选；所以它置空，默认名 `截图YYYYMMDDHHMMSS` 也去掉扩展名，扩展名按返回的 `nFilterIndex` 自己补。JPEG 没有 alpha 通道，这里不成问题：`RenderSelection` 裁到的每个像素都是不透明的桌面，盖不住的情况 `LockBits` 直接失败返回 nullptr，不会留下半透明像素，所以丢 alpha 是无损的。弹保存对话框之前必须先把 topmost 覆盖层降级，否则对话框开在它下面。
@@ -295,7 +297,7 @@ winshot/
 | `out/Export.h` / `.cpp` | 按 MIME 找 GDI+ 编码器 CLSID、按最终扩展名写 PNG 或 JPEG（JPEG 质量 90）、`GetSaveFileName` 封装（两条过滤器、`lpstrDefExt` 置空、按 `nFilterIndex` 补扩展名）、`截图YYYYMMDDHHMMSS` 默认名。 |
 | `out/ClipboardImage.h` / `.cpp` | 写 `CF_DIB` + `CF_BITMAP`。 |
 | `out/ClipboardText.h` / `.cpp` | 写文本（`C` 复制色号、OCR 复制用）。 |
-| `pin/PinWnd.h` / `.cpp` | 钉图窗：`HTCAPTION` 拖动、滚轮缩放、✕ 徽标、中键、右键菜单。 |
+| `pin/PinWnd.h` / `.cpp` | 钉图窗：`HTCAPTION` 拖动、滚轮缩放、✕ 徽标、中键、右键菜单（`OnNcRButtonDown`，因为除 ✕ 外右键是非客户区消息）。 |
 | `ocr/OcrService.h` / `.cpp` | C++/WinRT OCR：`Run`（同步）与 `StartAsync`（自己起线程 + `PostMessage`）。 |
 | `ocr/OcrResultWnd.h` / `.cpp` | 非模态结果窗：只读编辑框 + 复制 + 关闭，可切 topmost。 |
 | `longshot/Stitcher.h` / `.cpp` | 纯 C++ 拼接算法：`RowSignature` / `RowSignatures` / `FindShift` / `FindUpShift` / `FindInside` / `Tolerance`。不含 MFC 和 GDI+，所以能单独编译测试。 |
@@ -311,9 +313,9 @@ winshot/
 | `tools\make_icon.ps1` | 生成上面那个 .ico：读 PNG、染描边、重采样、手写 ICO 容器，然后把文件读回来逐条目校验，最后让 .NET 自己的图标读取器挑一档作为独立检查。 |
 | `tests\stitcher_test.cpp` | 拼接算法的单元测试，独立编译，退出码即结论。 |
 | `参考UI图\*.png` | 28 张 QQ 截图参考图，文件名即它对应的功能与状态。 |
-| `tools\*.ps1` | 95 个 PowerShell 脚本，分两类：**58 条端到端验收脚本**（下表），和 **37 条一次性调试探针**（`*_probe.ps1`、`scan_*`、`crop*`、`kill_menu*`、`menu_owner*`、`tray_*` 等）。探针是当时怎么定位某个 bug 的记录，故意留着不删。 |
+| `tools\*.ps1` | 96 个 PowerShell 脚本，分两类：**59 条端到端验收脚本**（下表），和 **37 条一次性调试探针**（`*_probe.ps1`、`scan_*`、`crop*`、`kill_menu*`、`menu_owner*`、`tray_*` 等）。探针是当时怎么定位某个 bug 的记录，故意留着不删。 |
 
-58 条验收脚本按它们盯的行为分组：
+59 条验收脚本按它们盯的行为分组：
 
 | 组 | 脚本 | 盯的行为 |
 | --- | --- | --- |
@@ -323,13 +325,13 @@ winshot/
 | 文字编辑 | `text_wrap` `text_wrap_fit` `text_edit_box` `text_ghost` `text_live_color` `text_edit_repaint` `text_first_click` | 换行时机、编辑框就是标签的盒子、重编辑不出双影、编辑中改色即时生效、退格和字中间回车当场重画（按每行右边界比编辑中与提交后的字形）、打开后的第一次点击光标落在点的地方（按 `GetGUIThreadInfo` 读光标） |
 | 放大镜与光标 | `loupe_once` `cursor_shape` `hover_pick` `hover_default` `hover_flicker` | 放大镜只画一次、每种意图一个光标、悬停预选窗口、停在桌面背景才描全屏（与窗口框二选一） |
 | 长截图 | `stage8_test` `ls_reverse` `ls_edit` `ls_throttle` | 拼接、反向拼接、编辑器、滚轮节流 |
-| 输出与常驻 | `stage6_test` `stage7_test` `save_format` `save_exits` `pin_close` `tray_rclick` | 放大镜与钉图与 OCR、保存对话框两种格式（断言落盘文件的魔数）、存成功即拆覆盖层而取消对话框什么都不动（普通与长截图两条路）、钉图关闭、真实右键点托盘图标 |
+| 输出与常驻 | `stage6_test` `stage7_test` `save_format` `save_exits` `pin_close` `pin_rclick` `tray_rclick` | 放大镜与钉图与 OCR、保存对话框两种格式（断言落盘文件的魔数）、存成功即拆覆盖层而取消对话框什么都不动（普通与长截图两条路）、钉图关闭、钉图右键菜单在图中间和角上徽标都弹出且同样大小、左边和顶边贴着按下点（弹在点击点右下方）、点外面能关掉、复制行上剪贴板、关闭行关窗（`#32768` 的 `GetMenu` 返回 0，所以按菜单像素数文字行数） |
 
 ---
 
 ## 开发调试迭代经过
 
-项目从 2026-10-15 起，七天，十次提交。下面按实际经过记，包括走过的弯路。
+项目从 2026-10-15 起。下面按实际经过记，包括走过的弯路。
 
 ### 10-15：一次把整条链路搭起来
 
@@ -417,6 +419,22 @@ winshot/
 * **两条打开路径的区别是鼠标捕获，这就是为什么只有一条出问题。** 文字工具在空白处按下是覆盖层自己处理的（`BeginTextEdit(pt, nullptr)`），它握着捕获，那一下的 up 归覆盖层，标记活到用户的下一次点击——被吞的就是它。双击重编辑那条 up 来得早，被它吃掉之后一切正常。判据是：**用户瞄准的点击是按下 + 抬起一起来的，而打开那一刻的抬起是单独到的**（它的按下归握着捕获的覆盖层）。所以把标记改在 `OnLButtonUp` 之前的 `OnLButtonDown` 里花掉：双击的 up 照样被吞，已经打开的编辑框里的第一次点击落在点的地方。
 * **`text_first_click` 四轮，钉的是同一个判据的两面。** 第 0 轮确认光标在文末（要求本身）；第 1 轮是报告本身，走文字工具那条路，点在第一行中间；第 2 轮换一行再点，防的是"光标根本没动"也算过；第 3 轮提交后双击重开，断言光标仍在文末且不在第一行——这条就是不能被这次修改弄坏的；第 4 轮再点一次，证明另一条打开路径修好了。光标用 `GetGUIThreadInfo` 读（控件在别的进程，跨进程的 `EM_GETSEL` 答案自相矛盾），跳回是同步发生的，所以读到的是用户看到的最终位置。断言用两条：光标行格要压在点的那一行上（多行文本下这一条就能判死），光标 x 要在点的 ±16px 内（单行文本下靠它）。把 `OnLButtonDown` 里那行注释掉重编，只有第 1 轮报错、报的正是"光标在 738..762 行，不在点的第一行 695..712"和"在 x 1054，离点的 x 1244 差 191px"，另外三轮两种版本都过——说明这次修改没有碰到它不该碰的。
 * **`text_edit_box` 的标记断言读的是壁纸，不是标记。** 这条修改顺带把它逼出来了：8 个标记是白芯方块，判"有没有标记"就是看那 8 个点是不是白的，而当天最大化的 Notepad++ 正好压在标签上，标记关掉时 8 个点全是 `255,255,255`——两个"不该有标记"的状态因此假失败，"该有 8 个"那条反而恒真。改成先拖完选区、在标签还不存在时抓一张没有标记的底图，谁的背景是白的那个点就作废、不计入，全作废时由"编辑中"那个正向对照报出真原因。底图和后面的抓屏亮度逐点一致（都是 `32,32,32`），所以这个作废判据不会跟 dim 打架。
+
+### 10-23：钉图的右键菜单只在角上那 22px 里有效
+
+* **README 写了三处的"右键菜单（复制 / 保存 / 关闭）"，用户发现它从来没弹出来过。** 它其实不是没实现，是只在钉图右上角那个 ✕ 徽标里有效——而那个方块的本职是关掉钉图，所以没人会去那里右键。
+* **第一层原因是命中测试。** `OnNcHitTest` 只对 ✕ 返回 `HTCLIENT`，其余全是 `HTCAPTION`（这是拖动的代价），所以在图上的右键是**非客户区**消息，而菜单挂在客户区的 `OnRButtonDown` 上。改挂 `ON_WM_NCRBUTTONUP` 之后还是不弹。
+* **第二层：必须是按下，不能是抬起。** `HTCAPTION` 上的右键按下会被 `DefWindowProc` 拿去跟踪它自己的系统菜单——那是一个模态循环，从按下一直吃到抬起，所以 `WM_NCRBUTTONUP` 根本不发给你。探针读的是"有没有菜单窗口出现"，按下版一装上去 `#32768` 就出现了，抬起版一次都没有。
+* **最贵的一课：MFC 消息映射里写错处理函数名，编译链接全过，然后什么都不做。** `ON_WM_NCRBUTTONDOWN()` 展开成引用**不限定**的 `OnNcRButtonDown` 的映射项，在 `CPinWnd` 作用域里如果派生类没声明这个名字，它 resolves 到继承来的 `CWnd::OnNcRButtonDown`——一个只转默认处理的壳。我前两次分别声明成 `OnNcButtonDown` 和 `OnNcButtonUp`，都编过、都链过、都是死代码。判据只能去翻 `afxwin.h`（`14.44.35207` 里是 `afx_msg void OnNcRButtonDown(UINT nHitTest, CPoint point);`，没有 `OnNcButtonDown`），不能看编译是否通过。
+* **`SetForegroundWindow` 和已有的 `PostMessage(WM_NULL)` 是一对，缺一个少一半。** `TrackPopupMenu` 对不是前台窗的窗弹菜单时，点外面不会消失；钉图是 topmost 却通常没有焦点（焦点在别的程序上），所以必须自己抢前台。托盘菜单那条路两个都有，钉图原来只有后半句。
+* **菜单只能按像素读：`#32768` 的 `GetMenu` 返回 0。** 所以 `GetMenuItemCount` / `GetMenuItemID` / `GetMenuItemRect` 全用不上，脚本本来想断言菜单项 id `1,2,-1,3`，写不出来。改成沿用 `tray_rclick` 的读法：截菜单那块矩形，数"有 ≥2 个暗像素、且连续 ≥4 行"的文字带。我们的菜单是 3 条（分隔线和 1px 边框太薄成不了带），默认处理可能弹的系统菜单是 6 条——这就是区分两者的判据。顺带记两个坑：`EnumWindows` 在这台机器上一个 `#32768` 都枚举不到，`FindWindowEx(NULL, NULL, "#32768", NULL)` 能，且必须按 owning pid 过滤（别的程序也可能有菜单开着）。实测菜单 166×79px，左边和底边正好钉在按下点（那是当时的 `TPM_BOTTOMALIGN`，同一天后面改成了顶边，见下一节）。
+* **`pin_rclick` 五轮，负对照是白捡的。** 第一次跑（对着还没修的构建）就在第 1 轮失败，报的正是用户说的那个症状。之后：图正中右键出菜单（3 条文字带、左边贴着按下点）、在钉图上但菜单外单击能关掉且钉图还活着、✕ 徽标那条路（唯一的 `HTCLIENT`）出同样大小的同一个菜单、复制行之后 `CF_DIB` 和 `CF_BITMAP` 都在（只写 `CF_DIB` 不够，是 `ClipboardImage.cpp` 自己的注释）、最后一行关掉钉图。保存行没点——它开对话框，`save_format` 已经在驱动那个对话框，而这里是同一个 `SaveWithDialog`。
+
+### 10-23：钉图菜单弹在点击点右下方、菜单项改名
+
+* **`TPM_BOTTOMALIGN` 让菜单整个压在用户正在看的那块画面上。** 左边和底边钉在按下点，等于往左上方长——而右键时用户盯着的正是按下点上方那块。改成 `TPM_TOPALIGN`（左边和顶边钉在按下点，往右下长）就把它挪开了。贴屏幕右边或下边的钉图不用自己夹，`TrackPopupMenu` 出工作区会自己翻边。托盘菜单保持原来的 `TPM_BOTTOMALIGN`：它和钉图用的是同一组标志，但托盘在屏幕底边，往上弹才对，两处是各自独立的调用，没有共用 helper。
+* **`复制到剪贴板` 和 `关闭` 这两个串同时是 OCR 结果窗的按钮文字**（`ocr/OcrResultWnd.cpp`），所以改名只能改 `PinWnd.cpp` 里那三行 `AppendMenu`，全局替换会顺手把那个窗改坏。`stage7_test` 正好覆盖它，它量那两个按钮的宽度（132 和 72 逻辑像素），跑一遍就证明没被牵连。顺带一提 `保存为 PNG…` 这个名字本来就不准：那个对话框有两种过滤器，PNG 和 JPG 都能存。
+* **改名把菜单从 166px 窄到 114px，高度不变（79px），文字带还是 3 条**——分隔线本来就太薄成不了带，所以 `pin_rclick` 的行数判据对改名和分隔线都不敏感，真正受影响的只有锚定那条：它原来断言菜单**底边**贴着按下点，翻成 top-align 之后底边在按下点下方整整一个菜单高。负对照照做——把 `TPM_TOPALIGN` 换回 `TPM_BOTTOMALIGN` 重编，第 1 轮报"菜单在 746，按下点在 825"，差的正是那 79px，另外四轮两种版本都过。不做这一步，那条断言可能只是被放宽成了恒真。
 
 ### 几条一直沿用的做法
 
